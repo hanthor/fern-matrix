@@ -39,6 +39,7 @@ export PATH="$(rustc --print sysroot)/bin:$binaryen_dir/bin:$PATH"
 
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export CARGO_INCREMENTAL=0
+export CARGO_BUILD_JOBS=2
 export FERN_YARN_VERSION="$(yarn --version)"
 export FERN_RUSTC_VERSION="$(rustc --version)"
 export FERN_CARGO_VERSION="$(cargo --version)"

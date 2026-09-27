@@ -15,6 +15,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24.14.0
+      - name: Free unused hosted-runner toolchains
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
+          sudo apt-get clean
+          df -h /
       - name: Rebuild twice from pinned Rust sources
         env:
           SDK_CANDIDATE_DIR: ${{ runner.temp }}/fern-sdk-candidates
