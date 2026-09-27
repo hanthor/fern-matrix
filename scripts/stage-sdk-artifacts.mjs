@@ -80,6 +80,7 @@ const buildInfo = {
   cargoLockSha256: createHash('sha256').update(await readFile(sourceLock)).digest('hex'),
   webManifestSha256: createHash('sha256').update(await readFile(workspaceManifest)).digest('hex'),
   downgradePatchSha256: createHash('sha256').update(await readFile(join(source, 'patches/0001-Downgrade-uniffi-to-0.29.4.patch'))).digest('hex'),
+  rustSdkBuildPatchSha256: createHash('sha256').update(await readFile(new URL('../patches/matrix-sdk-recursion-limit.patch', import.meta.url))).digest('hex'),
   wasmSha256: checksum,
   generatedFileCount: Object.keys(files).length,
   files,
