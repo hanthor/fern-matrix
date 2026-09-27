@@ -58,7 +58,7 @@ prepare_aurora() {
   [[ -d "$sdk/.git" ]] || fail "UBRN checkout did not create the configured Matrix Rust SDK"
   [[ "$(git -C "$sdk" rev-parse HEAD)" == "$rust_commit" ]] || fail "Matrix Rust SDK source commit mismatch"
   generator="$aurora_dir/node_modules/uniffi-bindgen-react-native"
-  rg -Fq "uniffi-bindgen-react-native#${generator_commit}" "$aurora_dir/yarn.lock" || fail "Frozen Yarn lock does not pin the configured UniFFI generator commit"
+  grep -Fq -- "uniffi-bindgen-react-native#${generator_commit}" "$aurora_dir/yarn.lock" || fail "Frozen Yarn lock does not pin the configured UniFFI generator commit"
   [[ -f "$generator/crates/ubrn_cli/Cargo.toml" ]] || fail "The pinned Yarn install has no UniFFI generator CLI manifest"
   patch="$aurora_dir/patches/0001-Downgrade-uniffi-to-0.29.4.patch"
   printf '%s  %s\n' "$patch_sha" "$patch" | sha256sum --check --status || fail "UniFFI compatibility patch changed"
