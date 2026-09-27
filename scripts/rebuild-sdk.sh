@@ -99,7 +99,10 @@ SHIM
     export CARGO_NET_OFFLINE=false
   fi
 
-  yarn --cwd "$aurora_dir" ubrn:web:build:release
+  # Generate native/TypeScript bindings and the WASM crate first. This pass
+  # intentionally skips compiling WASM until the generated crate is a member
+  # of the SDK workspace; the full build below must then succeed.
+  yarn --cwd "$aurora_dir" ubrn:web:build:release --no-wasm-pack
   python3 "$repo_root/scripts/set-sdk-workspace-member.py" "$aurora_dir/rust_modules/matrix-rust-sdk/Cargo.toml" --enable
   yarn --cwd "$aurora_dir" ubrn:web:build:release
   local wasm="$aurora_dir/src/generated/wasm-bindgen/index_bg.wasm"
