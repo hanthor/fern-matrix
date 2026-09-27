@@ -1,6 +1,6 @@
 # Feature coverage
 
-Status distinguishes UI automation from untested live-account interoperability.
+Status distinguishes UI automation from untested live-account interoperability. See the [versioned Element X parity inventory](PARITY.md) for the full planning baseline and linked [roadmap issues](https://github.com/hanthor/fern-matrix/issues/2).
 
 | Feature | Implemented | Initial validation |
 | --- | --- | --- |

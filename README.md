@@ -2,7 +2,7 @@
 
 A calm, responsive, multi-account Matrix client built with Vue 3, Frappe UI, and the Matrix Rust SDK compiled to WebAssembly. Its account rail and space navigation take inspiration from Cinny. The browser SDK integration follows Element HQ's Aurora experiment.
 
-**[Open Fern](https://hanthor.github.io/fern-matrix/) · [Source](https://github.com/hanthor/fern-matrix)**
+**[Open Fern](https://hanthor.github.io/fern-matrix/) · [Source](https://github.com/hanthor/fern-matrix) · [Roadmap](https://github.com/hanthor/fern-matrix/issues/2)**
 
 ![Fern desktop interface](docs/screenshots/desktop.png)
 
@@ -49,7 +49,7 @@ Browser tests use `FERN_CHROMIUM_PATH` when supplied, otherwise the locally inst
 
 ## Element X parity still to implement
 
-OIDC / SSO and QR login; full incoming-call / ringing lifecycle; voice recording and location sharing; rich text / mention autocomplete; threads; authenticated avatars; full event / media galleries and pinned-message browsing; server-wide message search; per-room notification preferences and background push; moderation / power-level UI; space creation and editing; accessibility and localization audits; native iOS / Android / desktop packaging; recovery setup edge cases; comprehensive encrypted interoperability and upgrade testing. See [the feature checklist](docs/FEATURES.md).
+OIDC / SSO and QR login; full incoming-call / ringing lifecycle; voice recording and location sharing; rich text / mention autocomplete; threads; authenticated avatars; full event / media galleries and pinned-message browsing; server-wide message search; per-room notification preferences and background push; moderation / power-level UI; space creation and editing; accessibility and localization audits; native iOS / Android / desktop packaging; recovery setup edge cases; comprehensive encrypted interoperability and upgrade testing. See [the feature checklist](docs/FEATURES.md), [versioned parity inventory](docs/PARITY.md), and [milestone roadmap](https://github.com/hanthor/fern-matrix/issues/2).
 
 Do not use the demo as evidence of live federation, encryption interoperability, or call media delivery. The browser suite verifies local UI behavior and that the vendored Rust WASM initializes and exposes its builder APIs.
 
