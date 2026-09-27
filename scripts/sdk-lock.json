@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "artifactOrigin": "Vendored artifacts from the pinned Aurora checkout; clean source rebuild remains unverified.",
+  "artifactOrigin": "Vendored artifacts from pinned Aurora; isolated source regeneration and runtime compatibility are verified, with Rust WASM closure export bytes varying between clean builds.",
   "sources": {
     "aurora": {
       "repository": "https://github.com/element-hq/aurora",

@@ -21,6 +21,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
           sudo apt-get clean
           df -h /
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Rebuild twice from pinned Rust sources
         env:
           SDK_CANDIDATE_DIR: ${{ runner.temp }}/fern-sdk-candidates
@@ -47,4 +50,8 @@ jobs:
           cp -a "$RUNNER_TEMP/fern-sdk-candidates/build-2/src/sdk/generated" src/sdk/generated
           cp "$RUNNER_TEMP/fern-sdk-candidates/build-2/src/sdk/index.ts" src/sdk/index.ts
           npm ci
+          npx playwright install --with-deps chromium
+          python -m venv .cache/fern-synapse
+          .cache/fern-synapse/bin/pip install -r tests/integration/requirements.txt
           npm run build
+          npm run test:integration

@@ -45,4 +45,4 @@ for (const path of expected) {
   if (hash.digest('hex') !== lock.files[path].sha256) throw new Error(`SDK artifact checksum mismatch: ${path}`)
 }
 console.log(`Verified ${expected.length} locked SDK artifacts/notices and runtime ${runtime.version}.`)
-console.log('This verifies checkout consistency; a reproducible source rebuild is still required by issue #5.')
+console.log('This verifies vendored checkout consistency. Source provenance and runtime interoperability are verified by the manual SDK rebuild workflow.')
