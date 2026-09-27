@@ -24,10 +24,14 @@ Do not serve this fixture on a public interface or reuse it for personal account
 
 - Password login, two accounts in one engine, separate databases, restored sessions and logout isolation.
 - Two isolated browser clients accepting invites and exchanging text, replies, edits, reactions, redactions and polls.
+- Two encrypted Fern clients exchanging text, replies, edits, reactions and file media. The test checks the sender's raw `/messages` response to confirm the homeserver stores ciphertext without the message body or attachment name/bytes.
+- A separately implemented `matrix-nio` 0.26.0 client logs in with E2EE enabled and joins a Fern-created encrypted room. Both clients exchange encrypted text and files; they also exchange a reply, an edit and reactions. Fern and matrix-nio independently download/decrypt the other's encrypted attachment, and server events are checked for ciphertext rather than plaintext.
+- Recovery backup creation, rejection of a second backup setup, unavailable-backup and invalid-key failures, a visible missing-key decryption error on a fresh device, and encrypted-history/media decryption after recovery.
+- Incoming same-account device-verification requests, SAS comparison and mutual approval, user cancellation, and SAS rejection on a separate live flow.
 - Typing notifications, server-side receipt state and history pagination from a fresh SDK store, including an actual server history request.
 - Public-directory search, encrypted DM creation and member lookup.
 
-The suite deliberately separates protocol tests from the demo UI tests. A passing adapter test proves that adapter scenario against the pinned fixture, not full UI interoperability, federation, production server compatibility or crypto/call correctness. Update `docs/FEATURES.md` only for scenarios actually exercised successfully.
+The suite deliberately separates protocol tests from the demo UI tests. Matrix-nio verifies encrypted text, replies, edits, reactions and file exchange independently; backup/recovery and device verification currently use Fern's Rust SDK on both ends. Verification protocol timeout and independent-client backup/verification flows remain untested. A passing adapter test proves that adapter scenario against the pinned fixture, not federation, production server compatibility, Element X interoperability, or call correctness. Update `docs/FEATURES.md` only for scenarios actually exercised successfully.
 
 CI runs both suites and the build in `.github/workflows/integration.yml`. Failure output identifies the scenario and assertion; no screenshots, traces, HAR files, raw server logs or credential files are uploaded. Keep test message content synthetic. For a failure requiring server diagnostics, inspect the ephemeral logs locally while the process is alive and redact before sharing.
 
@@ -37,7 +41,7 @@ This automated runner always starts its own disposable fixture. Do not point it 
 
 1. Record homeserver version/configuration, native sliding-sync discovery and authentication capabilities.
 2. Sign in two dedicated Fern test accounts; repeat the suite's room and messaging scenarios through the UI.
-3. Use a current independent Element X client for encrypted text, media, edits, reactions, verification, recovery and new-device restore (#6).
+3. Use a current independent Element X client for encrypted text, media, edits, reactions, verification, recovery and new-device restore (#6); the automated matrix-nio peer is not a substitute for Element X qualification.
 4. Exercise lost network, server restarts, token expiry and account removal (#7, #8). Preserve recovery keys before intentionally deleting local crypto state.
 5. Record browser/OS/client versions and pass/fail evidence without credentials, recovery keys or personal message content.
 

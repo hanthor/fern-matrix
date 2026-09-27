@@ -1,4 +1,4 @@
-import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterface, RoomInterface, TimelineInterface, TimelineItemInterface, EventTimelineItem, MediaSourceInterface, SessionVerificationControllerInterface, RoomListEntriesWithDynamicAdaptersResultInterface, RoomDescription } from './generated/matrix_sdk_ffi'
+import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterface, RoomInterface, TimelineInterface, TimelineItemInterface, EventTimelineItem, MediaSourceInterface, SessionVerificationControllerInterface, SessionVerificationRequestDetails, RoomListEntriesWithDynamicAdaptersResultInterface, RoomDescription } from './generated/matrix_sdk_ffi'
 import type { Account, Room, Message, Member, DirectoryRoom } from '../types'
 import { applyDiffs } from '../diff'
 
@@ -43,6 +43,7 @@ export class MatrixEngine {
   private objectUrls = new Map<string, string>()
   private roomLists = new Map<string, RoomListEntriesWithDynamicAdaptersResultInterface>()
   private verificationControllers = new Map<string, SessionVerificationControllerInterface>()
+  private pendingVerifications = new Map<string, SessionVerificationRequestDetails>()
   private alive = true
   constructor(private events: EngineEvents) {}
   getClient(id: string) {
@@ -55,11 +56,21 @@ export class MatrixEngine {
     if (!room) throw new Error('The room has not finished syncing.')
     return room
   }
+  private clearVerification(accountId: string, controller: SessionVerificationControllerInterface) {
+    const isCurrent = this.verificationControllers.get(accountId) === controller
+    if (isCurrent) this.verificationControllers.delete(accountId)
+    this.pendingVerifications.delete(accountId)
+    if (isCurrent) controller.setDelegate(undefined)
+  }
+  private deferClearVerification(accountId: string, controller: SessionVerificationControllerInterface) {
+    queueMicrotask(() => this.clearVerification(accountId, controller))
+  }
   private async builder(data: SavedAccount, discover: boolean) {
     const sdk = await loadSdk()
     let builder = new sdk.ClientBuilder()
       .indexeddbStore(new sdk.IndexedDbStoreBuilder(`fern-${data.storeId}`).passphrase(data.passphrase))
       .backupDownloadStrategy(sdk.BackupDownloadStrategy.AfterDecryptionFailure)
+      .autoEnableCrossSigning(true)
       .setSessionDelegate({
         retrieveSessionFromKeychain: userId => {
           const entry = Object.values(savedAccounts()).find(value => value.session.userId === userId && value.storeId === data.storeId)
@@ -350,19 +361,39 @@ export class MatrixEngine {
     if (await encryption.backupExistsOnServer()) throw new Error('This account already has a backup. Restore its existing recovery key instead.')
     return encryption.enableRecovery(true, undefined, { onUpdate: status => progress(status.tag) })
   }
-  async startVerification(accountId: string, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[] }) => void) {
-    const controller = await this.getClient(accountId).getSessionVerificationController()
+  private verificationDelegate(accountId: string, controller: SessionVerificationControllerInterface, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }) => void) {
     this.verificationControllers.set(accountId, controller)
     controller.setDelegate({
-      didReceiveVerificationRequest: () => update({ status: 'requested' }),
+      didReceiveVerificationRequest: details => {
+        this.pendingVerifications.set(accountId, details)
+        update({ status: 'incoming', deviceName: details.deviceDisplayName ?? details.senderProfile.displayName ?? details.deviceId })
+      },
       didAcceptVerificationRequest: () => { update({ status: 'accepted' }); void controller.startSasVerification().catch(error => this.events.error(accountId, errorText(error))) },
       didStartSasVerification: () => update({ status: 'comparing' }),
       didReceiveVerificationData: data => {
         if (data.tag === 'Emojis') update({ status: 'compare', emojis: data.inner.emojis.map(emoji => ({ symbol: emoji.symbol(), description: emoji.description() })) })
         else update({ status: 'compare', numbers: data.inner.values })
       },
-      didFail: () => update({ status: 'failed' }), didCancel: () => update({ status: 'canceled' }), didFinish: () => update({ status: 'verified' }),
+      didFail: () => { update({ status: 'failed' }); this.deferClearVerification(accountId, controller) },
+      didCancel: () => { update({ status: 'canceled' }); this.deferClearVerification(accountId, controller) },
+      didFinish: () => { update({ status: 'verified' }); this.deferClearVerification(accountId, controller) },
     })
+  }
+  async listenForVerificationRequests(accountId: string, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }) => void) {
+    const controller = this.verificationControllers.get(accountId) ?? await this.getClient(accountId).getSessionVerificationController()
+    this.verificationDelegate(accountId, controller, update)
+  }
+  async acceptVerificationRequest(accountId: string) {
+    const controller = this.verificationControllers.get(accountId)
+    const details = this.pendingVerifications.get(accountId)
+    if (!controller || !details) throw new Error('There is no pending verification request for this account.')
+    await controller.acknowledgeVerificationRequest(details.senderProfile.userId, details.flowId)
+    await controller.acceptVerificationRequest()
+    this.pendingVerifications.delete(accountId)
+  }
+  async startVerification(accountId: string, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }) => void) {
+    const controller = this.verificationControllers.get(accountId) ?? await this.getClient(accountId).getSessionVerificationController()
+    this.verificationDelegate(accountId, controller, update)
     await controller.requestDeviceVerification()
   }
   async finishVerification(accountId: string, matches: boolean) {
@@ -373,14 +404,19 @@ export class MatrixEngine {
   }
   async cancelVerification(accountId: string) {
     const controller = this.verificationControllers.get(accountId)
-    if (controller) { await controller.cancelVerification(); controller.setDelegate(undefined); this.verificationControllers.delete(accountId) }
+    if (controller) {
+      const pending = this.pendingVerifications.get(accountId)
+      if (pending) await controller.acknowledgeVerificationRequest(pending.senderProfile.userId, pending.flowId)
+      await controller.cancelVerification()
+      this.clearVerification(accountId, controller)
+    }
   }
   async logout(accountId: string) {
     await this.getClient(accountId).logout()
     await this.syncs.get(accountId)?.stop()
     this.handles.get(accountId)?.forEach(handle => handle.cancel())
     clearInterval(this.timers.get(accountId))
-    this.roomLists.delete(accountId); this.verificationControllers.get(accountId)?.setDelegate(undefined); this.verificationControllers.delete(accountId);
+    this.roomLists.delete(accountId); this.verificationControllers.get(accountId)?.setDelegate(undefined); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
     this.clients.delete(accountId); this.syncs.delete(accountId); this.handles.delete(accountId); this.timers.delete(accountId)
     const entries = savedAccounts(); delete entries[accountId]; localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
     for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) { URL.revokeObjectURL(url); this.objectUrls.delete(key) }
@@ -389,6 +425,7 @@ export class MatrixEngine {
   async dispose() {
     this.alive = false
     for (const controller of this.verificationControllers.values()) controller.setDelegate(undefined)
+    this.pendingVerifications.clear()
     for (const timer of this.timers.values()) clearInterval(timer)
     for (const handles of this.handles.values()) handles.forEach(handle => handle.cancel())
     await Promise.allSettled([...this.syncs.values()].map(sync => sync.stop()))

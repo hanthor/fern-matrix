@@ -25,7 +25,7 @@ try {
     await delay(200)
   }
   tests = spawn('npx', ['playwright', 'test', '--config', 'playwright.integration.config.ts', ...process.argv.slice(2)], {
-    stdio: 'inherit', env: { ...process.env, FERN_MATRIX_FIXTURE: ready },
+    stdio: 'inherit', env: { ...process.env, FERN_MATRIX_FIXTURE: ready, FERN_SYNAPSE_PYTHON: python },
   })
   process.exitCode = await new Promise((resolve, reject) => {
     tests.on('error', reject)

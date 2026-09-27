@@ -8,7 +8,7 @@ import type { Message, Room, DirectoryRoom } from './types'
 import { state, account, room, isDemo, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, selectRoom, switchAccount, send, toggleFavorite, upload, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, signIn, signOut, typingNotice, action, engine, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
-const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) modal.value = '' } })
+const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
 const form = ref({ server: 'matrix.org', username: '', password: '', name: '', topic: '', invite: '', alias: '', question: '', answers: 'A calmer workspace\nBetter mobile conversations', recoveryKey: '' })
 const draft = ref('')
 const reply = ref<Message>()
@@ -38,7 +38,7 @@ let stopCall: (() => void) | undefined
 let callGeneration = 0
 const recoveryOutput = ref('')
 const recoveryProgress = ref('')
-const verification = ref<{ status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[] }>({ status: 'waiting' })
+const verification = ref<{ status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }>({ status: 'waiting' })
 let verificationAccount = ''
 
 const spaces = computed(() => accountRooms.value.filter(value => value.space))
@@ -86,7 +86,7 @@ function keydown(event: KeyboardEvent) {
 }
 function shortcut(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key === 'k') { event.preventDefault(); open('search') }
-  if (event.key === 'Escape') { if (modal.value) modal.value = ''; else if (reply.value || edit.value) { reply.value = undefined; edit.value = undefined } else if (state.details) state.details = false; else state.mobileRoom = false }
+  if (event.key === 'Escape') { if (modal.value === 'verify') void closeVerification(); else if (modal.value) modal.value = ''; else if (reply.value || edit.value) { reply.value = undefined; edit.value = undefined } else if (state.details) state.details = false; else state.mobileRoom = false }
 }
 async function scrollToEnd() { await nextTick(); if (timeline.value) timeline.value.scrollTop = timeline.value.scrollHeight }
 function showEmoji(value?: Message) { emojiTarget.value = value; open('emoji') }
@@ -116,7 +116,16 @@ async function loadSecurity() {
   if (isDemo.value) { security.value = { deviceId: 'LOCAL-DEMO', recovery: 'Demo only', verified: 'Not connected' }; return }
   security.value = undefined
   const result = await action(() => engine.security(state.activeAccountId))
-  if (result) security.value = result
+  if (result) {
+    security.value = result
+    const id = state.activeAccountId
+    void action(() => engine.listenForVerificationRequests(id, value => {
+      if (state.activeAccountId !== id) return
+      verificationAccount = id
+      verification.value = value
+      if (value.status === 'incoming') modal.value = 'verify'
+    }))
+  }
 }
 async function loadDirectory() {
   const generation = ++directoryGeneration
@@ -166,8 +175,20 @@ async function startVerification() {
   open('verify')
   await action(() => engine.startVerification(verificationAccount, value => verification.value = value))
 }
+async function acceptIncomingVerification() {
+  verification.value = { ...verification.value, status: 'accepted' }
+  await action(() => engine.acceptVerificationRequest(verificationAccount))
+}
 async function approveVerification(matches: boolean) {
-  await action(() => engine.finishVerification(verificationAccount, matches))
+  await action(async () => {
+    await engine.finishVerification(verificationAccount, matches)
+    if (!matches) verification.value = { ...verification.value, status: 'mismatch' }
+  })
+}
+async function closeVerification() {
+  const shouldCancel = !['verified', 'failed', 'canceled', 'mismatch'].includes(verification.value.status)
+  modal.value = ''
+  if (shouldCancel && verificationAccount) await action(() => engine.cancelVerification(verificationAccount))
 }
 async function saveRecoveryKey() {
   const url = URL.createObjectURL(new Blob([`Fern Matrix recovery key\nAccount: ${account.value?.userId}\n\n${recoveryOutput.value}\n`], { type: 'text/plain' }))
@@ -210,15 +231,14 @@ watch(() => messages.value.at(-1)?.id, (id, previous) => {
   const latest = messages.value.at(-1)
   if (notifications.value && latest && !latest.own && id !== previous && document.hidden) new Notification(latest.name, { body: latest.body, icon: `${import.meta.env.BASE_URL}fern.svg` })
 })
-watch(modal, (value, previous) => {
-  if (previous === 'verify' && value !== 'verify' && verificationAccount) void action(() => engine.cancelVerification(verificationAccount))
+watch(modal, (_value, previous) => {
   if (previous === 'explore') { ++directoryGeneration; directorySession?.stop(); directorySession = undefined }
   if (previous === 'call') { ++callGeneration; stopCall?.(); stopCall = undefined }
   if (previous === 'settings') { recoveryOutput.value = ''; form.value.recoveryKey = '' }
 })
 watch(compactMessages, value => localStorage.setItem('fern.compact', String(value)))
 onMounted(() => { document.addEventListener('keydown', shortcut); void initialize(); void scrollToEnd() })
-onUnmounted(() => { document.removeEventListener('keydown', shortcut); stopCall?.(); directorySession?.stop(); void engine.dispose() })
+onUnmounted(() => { document.removeEventListener('keydown', shortcut); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
 </script>
 
 <template>
@@ -289,7 +309,7 @@ onUnmounted(() => { document.removeEventListener('keydown', shortcut); stopCall?
     <div v-if="modal === 'settings'" class="settings-layout"><nav><Button v-for="tab in [{ id: 'general', label: 'Appearance', icon: Sun }, { id: 'accounts', label: 'Accounts', icon: Users }, { id: 'security', label: 'Security', icon: ShieldCheck }, { id: 'notifications', label: 'Notifications', icon: Bell }]" :key="tab.id" variant="ghost" :class="{ selected: settingsTab === tab.id }" @click="settingsTab = tab.id; if (tab.id === 'security') loadSecurity()"><component :is="tab.icon" :size="16"/>{{ tab.label }}</Button></nav><div class="settings-content"><template v-if="settingsTab === 'general'"><h3>Make yourself at home</h3><p>Little preferences, a space that feels like you.</p><div class="settings-row"><span><strong>Appearance</strong><small>Choose a color scheme</small></span><FormControl :model-value="colorScheme" type="select" aria-label="Color scheme" :options="[{ label: 'Light', value: 'light' }, { label: 'Dark', value: 'dark' }, { label: 'System', value: 'system' }]" @update:model-value="setColorScheme($event as 'light' | 'dark' | 'system')"/></div><div class="settings-row"><span><strong>Compact messages</strong><small>More conversation, less space</small></span><Switch v-model="compactMessages" aria-label="Compact messages"/></div><div class="settings-about"><Leaf :size="19"/><span>Fern <small>0.1.0 · Frappe UI + Matrix Rust SDK</small></span></div></template><template v-if="settingsTab === 'accounts'"><h3>All your accounts. One home.</h3><p>Account stores, drafts, and timelines stay separate.</p><div class="profile-edit"><FormControl v-model="profileName" label="Your display name"/><Button variant="outline" @click="updateProfile">Save</Button></div><div v-for="value in state.accounts" :key="value.id" class="settings-account"><UserAvatar :name="value.name"/><span><strong>{{ value.name }}</strong><small>{{ value.userId }}</small></span><Button variant="outline" :disabled="value.id === state.activeAccountId" @click="switchAccount(value.id)">{{ value.id === state.activeAccountId ? 'Active' : 'Switch' }}</Button></div><Button variant="solid" theme="green" @click="open('login')"><Plus :size="15"/>Add account</Button><Button v-if="!isDemo" variant="ghost" theme="red" @click="signOut(); modal = ''">Sign out of current account</Button></template><template v-if="settingsTab === 'security'"><h3>Your conversations belong to you</h3><p>Encryption runs on your device through the Rust SDK.</p><div class="security-summary"><ShieldCheck :size="28"/><span>{{ isDemo ? 'Local demonstration' : 'Device security' }}<small>{{ security?.verified ?? 'Loading device information…' }}</small></span></div><div v-if="security" class="security-info"><span>Device ID <code>{{ security.deviceId }}</code></span><span>Key recovery <strong>{{ security.recovery }}</strong></span><span v-if="security.fingerprint">Fingerprint <code>{{ security.fingerprint }}</code></span></div><FormControl v-model="form.recoveryKey" type="password" label="Recovery key" placeholder="Enter your existing recovery key" autocomplete="off"/><Button variant="outline" :disabled="!form.recoveryKey.trim()" :loading="modalBusy" @click="recoverKeys">Restore encrypted history</Button><Button variant="outline" @click="startVerification">Verify with another device</Button><Button v-if="security?.recovery === 'Disabled'" variant="outline" :loading="modalBusy" @click="enableRecovery">Set up key recovery</Button><p v-if="recoveryProgress && modalBusy" class="form-note">{{ recoveryProgress }}</p><div v-if="recoveryOutput" class="recovery-output"><strong>Save your recovery key</strong><p>Keep this key somewhere safe. You’ll need it to restore encrypted history on another device.</p><code>{{ recoveryOutput }}</code><Button variant="outline" @click="saveRecoveryKey">Download recovery key</Button></div><p class="form-note">Compare the emoji or numbers on both devices before approving verification.</p></template><template v-if="settingsTab === 'notifications'"><h3>Stay in the conversation</h3><p>Browser notifications work while Fern is open.</p><div class="settings-row"><span><strong>Desktop notifications</strong><small>For new messages in the selected room</small></span><Switch :model-value="notifications" aria-label="Desktop notifications" @update:model-value="enableNotifications(Boolean($event))"/></div><p class="form-note">Background push and per-room notification rules are not yet available.</p></template></div></div>
     <div v-if="modal === 'explore'" class="directory-view"><form @submit.prevent="loadDirectory"><FormControl v-model="directoryQuery" type="search" aria-label="Search public rooms" placeholder="Find a community…"/><Button variant="solid" theme="green" type="submit" :loading="modalBusy">Search</Button></form><p class="form-note">{{ isDemo ? 'Local demo communities' : 'Public rooms on your homeserver' }}</p><div v-for="value in directoryRooms" :key="value.id" class="directory-row"><span class="room-icon"><Hash :size="19"/></span><div><strong>{{ value.name }}</strong><p>{{ value.topic }}</p><small>{{ value.members }} members</small></div><Button variant="outline" @click="joinDirectory(value)">{{ accountRooms.some(item => item.id === value.id) ? 'Open' : 'Join' }}</Button></div><p v-if="!directoryRooms.length && !modalBusy" class="form-note">No rooms found. Try a different search.</p><Button v-if="!directoryEnd" variant="outline" :loading="modalBusy" @click="moreDirectory">Load more rooms</Button></div>
     <div v-if="modal === 'call'" class="call-view"><iframe ref="callFrame" title="Element Call" allow="camera; microphone; display-capture; autoplay; encrypted-media" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"/><p class="form-note">Calls use Element Call and your homeserver’s MatrixRTC service.</p></div>
-    <div v-if="modal === 'verify'" class="verification-view"><ShieldCheck :size="38"/><h3>{{ verification.status === 'verified' ? 'Device verified' : verification.status === 'compare' ? 'Do these match?' : 'Check your other device' }}</h3><p v-if="verification.status === 'waiting' || verification.status === 'requested'">Open a verified Matrix client and accept the verification request.</p><p v-if="verification.status === 'accepted' || verification.status === 'comparing'">Waiting for the security comparison…</p><p v-if="verification.status === 'compare'">Compare these with your other device. Only approve if every value matches.</p><div v-if="verification.emojis" class="verification-emojis"><span v-for="emoji in verification.emojis" :key="emoji.description"><strong>{{ emoji.symbol }}</strong><small>{{ emoji.description }}</small></span></div><div v-if="verification.numbers" class="verification-numbers">{{ verification.numbers.join(' · ') }}</div><p v-if="verification.status === 'verified'">Your devices can now trust each other.</p><p v-if="verification.status === 'failed' || verification.status === 'canceled'">Verification {{ verification.status }}. Close this dialog and try again.</p><div class="dialog-actions"><Button v-if="verification.status === 'compare'" theme="red" variant="outline" @click="approveVerification(false)">They don’t match</Button><Button v-if="verification.status === 'compare'" variant="solid" theme="green" @click="approveVerification(true)">They match</Button><Button v-else variant="outline" @click="modal = ''">{{ verification.status === 'verified' ? 'Done' : 'Close' }}</Button></div></div>
+    <div v-if="modal === 'verify'" class="verification-view"><ShieldCheck :size="38"/><h3>{{ verification.status === 'verified' ? 'Device verified' : verification.status === 'compare' ? 'Do these match?' : verification.status === 'incoming' ? 'A device wants to verify' : verification.status === 'mismatch' ? 'Comparison did not match' : 'Check your other device' }}</h3><p v-if="verification.status === 'waiting' || verification.status === 'requested'">Open another Matrix device and accept this verification request.</p><p v-if="verification.status === 'incoming'">{{ verification.deviceName }} is requesting to verify this session. Only continue if you started this request on a device you control.</p><p v-if="verification.status === 'accepted' || verification.status === 'comparing'">Waiting for the security comparison…</p><p v-if="verification.status === 'compare'">Compare these with your other device. Only approve if every value matches.</p><div v-if="verification.emojis" class="verification-emojis"><span v-for="emoji in verification.emojis" :key="emoji.description"><strong>{{ emoji.symbol }}</strong><small>{{ emoji.description }}</small></span></div><div v-if="verification.numbers" class="verification-numbers">{{ verification.numbers.join(' · ') }}</div><p v-if="verification.status === 'verified'">Your devices can now trust each other.</p><p v-if="verification.status === 'mismatch'">Neither device was verified. Close this dialog and start again if you want to compare a new request.</p><p v-if="verification.status === 'failed' || verification.status === 'canceled'">Verification {{ verification.status }}. Close this dialog and try again.</p><div class="dialog-actions"><template v-if="verification.status === 'incoming'"><Button theme="red" variant="outline" @click="closeVerification">Decline request</Button><Button variant="solid" theme="green" @click="acceptIncomingVerification">Accept request</Button></template><template v-else-if="verification.status === 'compare'"><Button theme="red" variant="outline" @click="approveVerification(false)">They don’t match</Button><Button variant="solid" theme="green" @click="approveVerification(true)">They match</Button></template><Button v-else variant="outline" @click="closeVerification">{{ verification.status === 'verified' || verification.status === 'mismatch' ? 'Done' : 'Close' }}</Button></div></div>
     <div v-if="modal === 'help'" class="help-content"><span class="welcome-logo"><Leaf :size="35"/></span><h2>A calmer place to connect.</h2><p>Fern brings the Frappe UI design language to Matrix, with Cinny-inspired spaces and account navigation.</p><p>The demo is local. Connect an account for real encrypted messaging, room management, reactions, files, and polls.</p><div class="help-shortcuts"><span>Find a conversation <kbd>Ctrl / ⌘ K</kbd></span><span>Send a message <kbd>Enter</kbd></span><span>New line <kbd>Shift Enter</kbd></span></div><p class="form-note">Early development: QR / OIDC login, threads, background push, and full Element X parity remain on the roadmap.</p><Button variant="solid" theme="green" @click="open('login')">Connect your account <ArrowUpRight :size="15"/></Button></div>
   </Dialog>
 </FrappeUIProvider>
