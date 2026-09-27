@@ -12,9 +12,9 @@
 
 This app uses the artifacts from that specific checkout, not the latest Rust SDK release. A release upgrade requires regenerating and testing the bindings and WASM together. The original Aurora experiment is experimental; this application's reuse does not establish production readiness.
 
-`scripts/sdk-lock.json` records all generated bindings, WASM glue, WASM, initialization wrapper and license notice sizes/SHA256 hashes, plus the configured upstream sources and downgrade-patch hash. `npm run sdk:verify` checks the exact file set, contents and runtime package/lock version. Pages and live integration CI run this check. It detects mismatched or incomplete updates; it is not independent binary attestation or proof of reproducible compilation.
+`scripts/sdk-lock.json` records all generated bindings, WASM glue, WASM, initialization wrapper and license notice sizes/SHA256 hashes, plus the configured upstream sources and downgrade-patch hash. `npm run sdk:verify` checks the exact file set, contents and runtime package/lock version. Pages and live integration CI run this check. It detects mismatched or incomplete updates; it is not independent binary attestation.
 
-Issue [#5](https://github.com/hanthor/fern-matrix/issues/5) remains open for clean source regeneration, pinned build tools and build-dependency lockfiles, upgrade/rollback procedures and rebuild evidence. The current lock describes audited vendored artifacts; do not update its hashes merely to silence a failure. Review new source pins and generated changes, run live/browser interoperability checks, then intentionally refresh the lock as part of the upgrade.
+Issue [#5](https://github.com/hanthor/fern-matrix/issues/5) tracks source regeneration and rollback evidence. The current lock describes audited vendored artifacts; do not update its hashes merely to silence a failure. Review new source pins and generated changes, run live/browser interoperability checks, then intentionally refresh the lock as part of an SDK upgrade.
 
 ## Files and changes
 
@@ -26,21 +26,10 @@ Aurora's AGPL license text is included as `LICENSE.txt`. Original generated and 
 
 ## Rebuild from Rust
 
-Use a separate checkout so Aurora's regeneration script cannot reset application work:
+Run the **Reproducible Rust SDK rebuild** GitHub Actions workflow manually. It uses Ubuntu 24.04, Node 24.14.0, Yarn 1.22.22, Rust 1.94.1, `wasm-bindgen-cli` 0.2.105 and Binaryen 123. It checks out Aurora, Rust SDK and generator at the commits above, verifies the UniFFI patch checksum, and uses only disposable source directories under the runner temp path. Both clean builds must produce identical generated file sets and SHA256 hashes; the workflow then compiles Fern against the second output. The workflow does not publish or commit generated files.
 
-```sh
-git clone https://github.com/element-hq/aurora.git /tmp/fern-sdk-source
-git -C /tmp/fern-sdk-source checkout 95e69fc560e31ea263f3e4d45fb9125557f49ace
-```
+The first run bootstraps `Cargo.lock` from the pinned source graph and uses that output as the lock for the second clean build. Download the workflow artifact and review both `build-info.json` files, generated bindings/API changes, the optimized WASM checksum and `sdk-build.Cargo.lock`. Commit the candidate lock as `scripts/sdk-build.Cargo.lock`, rerun the workflow, and require a passing build using that committed lock before adopting the artifacts.
 
-Install the upstream prerequisites (`cargo`, `wasm-bindgen-cli`, Yarn and Binaryen's `wasm-opt`), then run Aurora's `build-wasm-bindings.sh` inside that checkout. Its script installs the configured Rust source, applies its UniFFI downgrade patch, generates a wasm workspace, builds and optimizes the WASM. Review that script before running it; it resets its own SDK checkout during regeneration.
+To adopt a candidate, copy `src/sdk/` and `LICENSE.txt` from the artifact, inspect the complete diff, update the artifact checksums and source/tool metadata in `scripts/sdk-lock.json`, and update this provenance record. Run `npm run sdk:verify`, the browser and live Matrix integration checks, and the production build before merging. A new binding surface may require changes to `src/sdk/engine.ts` and UI services. Do not replace the currently locked artifacts until the source rebuild and compatibility checks pass.
 
-From this application's directory:
-
-```sh
-node scripts/vendor-sdk.mjs /tmp/fern-sdk-source
-npm run build
-npm run test:e2e
-```
-
-The copy script reapplies the modifier patch. Update this provenance document with the new commits and printed checksum. New bindings may require changing `src/sdk/engine.ts`. Actual regeneration was not performed in the initial implementation; the checked-in upstream binary was verified to initialize in Chromium.
+To roll back, revert the single adoption commit; it restores the prior bindings, WASM, provenance and hashes together. The previous verified binaries remain in Git history and the published build is not changed by the rebuild workflow itself.

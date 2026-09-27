@@ -1,0 +1,42 @@
+name: Reproducible Rust SDK rebuild
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sdk-rebuild
+  cancel-in-progress: false
+jobs:
+  rebuild:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.14.0
+      - name: Rebuild twice from pinned Rust sources
+        env:
+          SDK_CANDIDATE_DIR: ${{ runner.temp }}/fern-sdk-candidates
+        run: bash scripts/rebuild-sdk.sh
+      - name: Upload reviewed rebuild candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: fern-rust-sdk-rebuild-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ runner.temp }}/fern-sdk-candidates/build-1/build-info.json
+            ${{ runner.temp }}/fern-sdk-candidates/build-2/src/sdk/**
+            ${{ runner.temp }}/fern-sdk-candidates/build-2/LICENSE.txt
+            ${{ runner.temp }}/fern-sdk-candidates/build-2/Cargo.lock
+            ${{ runner.temp }}/fern-sdk-candidates/build-2/web-Cargo.toml
+            ${{ runner.temp }}/fern-sdk-candidates/build-2/build-info.json
+            ${{ runner.temp }}/fern-sdk-candidates/sdk-build.Cargo.lock
+      - name: Compile the app against the regenerated SDK
+        run: |
+          rm -rf src/sdk/generated
+          cp -a "$RUNNER_TEMP/fern-sdk-candidates/build-2/src/sdk/generated" src/sdk/generated
+          cp "$RUNNER_TEMP/fern-sdk-candidates/build-2/src/sdk/index.ts" src/sdk/index.ts
+          npm ci
+          npm run build
