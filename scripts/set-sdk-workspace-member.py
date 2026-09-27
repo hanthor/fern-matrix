@@ -23,8 +23,7 @@ if args.enable:
     if matches != 1:
         raise SystemExit(f"Expected exactly one workspace xtask member, found {matches}")
 else:
-    if present != 1:
-        raise SystemExit("Expected exactly one generated bindings/wasm workspace entry to remove")
-    content = content.replace(entry, "", 1)
+    if present == 1:
+        content = content.replace(entry, "", 1)
 
 path.write_text(content)
