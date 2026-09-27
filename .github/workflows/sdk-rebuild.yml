@@ -27,12 +27,14 @@ jobs:
         run: bash scripts/rebuild-sdk.sh
       - name: Upload reviewed rebuild candidates
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: fern-rust-sdk-rebuild-${{ github.run_id }}
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90
           path: |
             ${{ runner.temp }}/fern-sdk-candidates/build-1/build-info.json
+            ${{ runner.temp }}/fern-sdk-candidates/build-1/src/sdk/generated/wasm-bindgen/**
             ${{ runner.temp }}/fern-sdk-candidates/build-2/src/sdk/**
             ${{ runner.temp }}/fern-sdk-candidates/build-2/LICENSE.txt
             ${{ runner.temp }}/fern-sdk-candidates/build-2/Cargo.lock
