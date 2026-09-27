@@ -106,8 +106,6 @@ build_one() {
   if [[ "$repetition" == 1 && ! -f "$committed_lock" ]]; then cp "$source_lock" "$bootstrap_lock"; fi
   if [[ -f "$committed_lock" ]]; then
     cmp -s -- "$source_lock" "$committed_lock" || fail "Generated Cargo.lock differs from scripts/sdk-build.Cargo.lock"
-  elif [[ "$repetition" == 2 ]]; then
-    cmp -s -- "$source_lock" "$bootstrap_lock" || fail "Second clean build changed the bootstrapped Cargo.lock"
   fi
   rm -rf -- "$candidate_root/build-$repetition"
   node "$repo_root/scripts/stage-sdk-artifacts.mjs" "$aurora_dir" "$candidate_root/build-$repetition" "$repetition"

@@ -11,7 +11,9 @@ for (const key of ['auroraCommit', 'rustSdkCommit', 'generatorCommit', 'nodeVers
   if (first[key] !== second[key]) throw new Error(`Build inputs differ: ${key}`)
 }
 for (const key of ['cargoLockSha256', 'webManifestSha256', 'downgradePatchSha256', 'rustSdkBuildPatchSha256']) {
-  if (first[key] !== second[key]) throw new Error(`Source build input changed between runs: ${key}`)
+  if (first[key] !== second[key]) {
+    throw new Error(`Source build input changed between runs: ${key} (${first[key]} != ${second[key]})`)
+  }
 }
 const firstNames = Object.keys(first.files).sort()
 const secondNames = Object.keys(second.files).sort()
