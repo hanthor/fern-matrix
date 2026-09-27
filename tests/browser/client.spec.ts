@@ -80,12 +80,14 @@ test('phone navigation, room details and sending have no horizontal overflow', a
 })
 test('vendored Matrix Rust SDK WASM initializes in a real browser', async ({ page }) => {
   await page.goto('/')
+  await page.route('https://matrix-test.invalid/**', route => route.fulfill({ json: { versions: ['v1.11'], unstable_features: { 'org.matrix.simplified_msc3575': true } } }))
   const result = await page.evaluate(async () => {
     // @ts-expect-error Browser imports are resolved by the Vite development server.
     const { loadSdk } = await import('/src/sdk/engine.ts')
     const sdk = await loadSdk()
     const builder = new sdk.ClientBuilder()
-    return { builder: typeof builder.build, indexedDb: typeof sdk.IndexedDbStoreBuilder, send: typeof sdk.MessageType.Text, sync: typeof sdk.SlidingSyncVersionBuilder.DiscoverNative }
+    const client = await builder.homeserverUrl('https://matrix-test.invalid').indexeddbStore(new sdk.IndexedDbStoreBuilder(`fern-test-${crypto.randomUUID()}`).passphrase('isolated-test-store-passphrase')).build()
+    return { homeserver: client.homeserver(), builder: typeof builder.build, indexedDb: typeof sdk.IndexedDbStoreBuilder, send: typeof sdk.MessageType.Text, sync: typeof sdk.SlidingSyncVersionBuilder.DiscoverNative }
   })
-  expect(result).toMatchObject({ builder: 'function', indexedDb: 'function', send: 'function' })
+  expect(result).toMatchObject({ homeserver: 'https://matrix-test.invalid/', builder: 'function', indexedDb: 'function', send: 'function' })
 })

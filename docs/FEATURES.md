@@ -6,7 +6,7 @@ Status distinguishes UI automation from untested live-account interoperability.
 | --- | --- | --- |
 | Desktop / phone layout | Yes | Chromium desktop and 390px phone browser tests |
 | Account switching and draft isolation | Yes | Browser tests with two demo accounts |
-| SDK WASM initialization | Yes | Real Chromium WASM module / builder test |
+| SDK WASM initialization | Yes | Real Chromium WASM initialization / encrypted IndexedDB client creation against a mocked server |
 | Password login / session restore / refresh | Yes | Type checked; needs a live test account |
 | Native sliding sync / room lists / hierarchy | Yes | Type checked; needs homeserver integration |
 | E2EE message send / receive / recovery | Yes | Rust SDK implementation; needs two-client interoperability |

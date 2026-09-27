@@ -13,7 +13,7 @@ The demo is persisted separately. User-uploaded demo blobs are not persisted acr
 ## Validation
 
 - `npm test`: batched SDK timeline updates, local-echo replacement, history ordering and vector reset/removal behavior.
-- `npm run test:e2e`: desktop messaging, replies, edits, reaction toggling, poll voting and reload persistence; account and draft isolation; creation and quick switching; security view; phone navigation and width; actual Rust WASM initialization.
+- `npm run test:e2e`: desktop messaging, replies, edits, reaction toggling, poll voting and reload persistence; account and draft isolation; creation and quick switching; security view; phone navigation and width; actual Rust WASM initialization and client creation with encrypted IndexedDB against a mocked versions endpoint.
 - `npm run build`: TypeScript / Vue checking, static build, versioned offline shell and base-aware manifest generation.
 - Production smoke check: Pages subdirectory asset resolution, SDK WASM initialization, shell offline reload and dark / mobile rendering.
 

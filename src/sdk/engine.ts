@@ -5,7 +5,11 @@ import { applyDiffs } from '../diff'
 type Bindings = typeof import('./index')
 let bindingPromise: Promise<Bindings> | undefined
 export function loadSdk(): Promise<Bindings> {
-  return bindingPromise ??= import('./index').then(async sdk => { await sdk.uniffiInitAsync(); return sdk }).catch(error => { bindingPromise = undefined; throw error })
+  return bindingPromise ??= import('./index').then(async sdk => {
+    await sdk.uniffiInitAsync()
+    sdk.initPlatform({ logLevel: sdk.LogLevel.Warn, traceLogPacks: [], extraTargets: [], writeToStdoutOrSystem: false, writeToFiles: undefined }, true)
+    return sdk
+  }).catch(error => { bindingPromise = undefined; throw error })
 }
 interface SavedAccount { session: Session; storeId: string; passphrase: string }
 const STORAGE_KEY = 'fern.sessions.v1'
