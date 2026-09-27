@@ -189,7 +189,9 @@ export class MatrixEngine {
     } else if (kind.tag === 'Poll') {
       result.kind = 'poll'
       result.body = kind.inner.question
-      result.poll = { question: kind.inner.question, answers: kind.inner.answers.map(answer => ({ id: answer.id, text: answer.text, count: [...kind.inner.votes.values()].filter(votes => votes.includes(answer.id)).length })), voted: kind.inner.votes.get(this.getClient(accountId).userId())?.[0] }
+      // SDK poll results map answer IDs to voter IDs, rather than users to answers.
+      const userId = this.getClient(accountId).userId()
+      result.poll = { question: kind.inner.question, answers: kind.inner.answers.map(answer => ({ id: answer.id, text: answer.text, count: kind.inner.votes.get(answer.id)?.length ?? 0 })), voted: [...kind.inner.votes].find(([, voters]) => voters.includes(userId))?.[0] }
     } else if (kind.tag === 'Redacted') result.body = 'Message removed'
     else if (kind.tag === 'UnableToDecrypt') result.body = 'Unable to decrypt this message. Restore your recovery key in Security settings.'
     else result.body = kind.tag

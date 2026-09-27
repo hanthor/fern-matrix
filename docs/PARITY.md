@@ -19,7 +19,7 @@ Aurora is an experimental SDK integration reference, not a released web/desktop 
 
 ## Capability inventory
 
-Rows apply to Fern's desktop and mobile **browser UI** unless explicitly platform-specific. All native capabilities are currently absent. “Adapter” means implemented integration code without live interoperability evidence. Demo tests cannot upgrade that status. Each row links pinned upstream capability evidence and the issue(s) that own completion. The final sign-off must assess individual variants and add new rows as needed.
+This table records the initial audit at the Fern starting revision. For subsequent live-core evidence and updates, see [feature coverage](FEATURES.md) and [the integration suite](INTEGRATION.md). Rows apply to Fern's desktop and mobile **browser UI** unless explicitly platform-specific. All native capabilities are currently absent. “Adapter” means implemented integration code without live interoperability evidence. Demo tests cannot upgrade that status. Each row links pinned upstream capability evidence and the issue(s) that own completion. The final sign-off must assess individual variants and add new rows as needed.
 
 | Capability | Fern evidence / gap | Delivery issues | Pinned upstream source (Android / iOS) |
 | --- | --- | --- | --- |

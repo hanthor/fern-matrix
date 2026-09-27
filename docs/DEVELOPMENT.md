@@ -14,12 +14,13 @@ The demo is persisted separately. User-uploaded demo blobs are not persisted acr
 
 - `npm test`: batched SDK timeline updates, local-echo replacement, history ordering and vector reset/removal behavior.
 - `npm run test:e2e`: desktop messaging, replies, edits, reaction toggling, poll voting and reload persistence; account and draft isolation; creation and quick switching; security view; phone navigation and width; actual Rust WASM initialization and client creation with encrypted IndexedDB against a mocked versions endpoint.
+- `npm run test:integration`: real pinned Synapse and two isolated Rust SDK browser clients; see [live integration setup and evidence boundaries](INTEGRATION.md).
 - `npm run build`: TypeScript / Vue checking, static build, versioned offline shell and base-aware manifest generation.
 - Production smoke check: Pages subdirectory asset resolution, SDK WASM initialization, shell offline reload and dark / mobile rendering.
 
-For portable browser tests, supply `FERN_CHROMIUM_PATH=/path/to/chromium`. The default points to the shared development environment's browser installation; it is intentionally not used by the Pages workflow.
+Browser tests default to Playwright's installed Chromium (`npx playwright install chromium`). Supply `FERN_CHROMIUM_PATH=/path/to/chromium` to use another installation. The separate integration workflow exercises browser and real-server tests in CI.
 
-Live Matrix tests require dedicated test accounts. Verify password login and reload restoration, independent sync with two accounts, encrypted messages / replies / edits / reactions and attachments between clients, history recovery, emoji verification, invites / DMs / directory membership, interrupted network recovery, logout, and a call with a second participant. These were not verified during the initial build. Calls require a homeserver advertising MatrixRTC and functioning MatrixRTC authorization / LiveKit services.
+Live Matrix tests require dedicated test accounts. Verify password login and reload restoration, independent sync with two accounts, encrypted messages / replies / edits / reactions and attachments between clients, history recovery, emoji verification, invites / DMs / directory membership, interrupted network recovery, logout, and a call with a second participant. The disposable suite now verifies the core unencrypted adapter scenarios and session isolation. Independent E2EE, recovery/verification, interrupted-network, federation and call scenarios remain unverified. Calls require a homeserver advertising MatrixRTC and functioning MatrixRTC authorization / LiveKit services.
 
 ## Deployment
 

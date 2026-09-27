@@ -1,0 +1,37 @@
+name: Live Matrix integration
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: matrix-integration-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  live-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/integration/requirements.txt
+      - run: npm ci
+      - name: Install pinned disposable homeserver
+        run: |
+          python -m venv .cache/fern-synapse
+          .cache/fern-synapse/bin/pip install -r tests/integration/requirements.txt
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - run: npm run test:e2e
+      - run: npm run test:integration
+      - run: npm run build
+      # Intentionally no trace/HAR/server-log upload: those can expose sessions.

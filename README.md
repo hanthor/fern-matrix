@@ -6,7 +6,7 @@ A calm, responsive, multi-account Matrix client built with Vue 3, Frappe UI, and
 
 ![Fern desktop interface](docs/screenshots/desktop.png)
 
-Fern is an early implementation, **not a finished Element X replacement**. The interactive local demo works without credentials. Live messaging uses the Rust SDK; there is no Matrix JavaScript SDK fallback. Real-account interoperability and the calling/verification flows still require testing against a homeserver and other clients.
+Fern is an early implementation, **not a finished Element X replacement**. The interactive local demo works without credentials. Live messaging uses the Rust SDK; there is no Matrix JavaScript SDK fallback. Core login, sync and messaging adapters are tested against disposable Synapse with two browser clients. Independent encryption interoperability and calling/verification flows still need validation with other clients.
 
 ## Run
 
@@ -26,7 +26,7 @@ npm run build
 npm run preview
 ```
 
-Browser tests use `FERN_CHROMIUM_PATH` when supplied, otherwise the locally installed Chromium path. For a new machine, run `npx playwright install chromium`, then set `FERN_CHROMIUM_PATH` to its executable. `docs/DEVELOPMENT.md` describes the tests and architecture.
+Browser tests use Playwright's installed Chromium, or `FERN_CHROMIUM_PATH` when supplied. For a new machine, run `npx playwright install chromium`. `docs/DEVELOPMENT.md` describes the tests and architecture. The [live integration guide](docs/INTEGRATION.md) explains the disposable Synapse environment and `npm run test:integration`.
 
 ## Implemented
 
@@ -51,7 +51,7 @@ Browser tests use `FERN_CHROMIUM_PATH` when supplied, otherwise the locally inst
 
 OIDC / SSO and QR login; full incoming-call / ringing lifecycle; voice recording and location sharing; rich text / mention autocomplete; threads; authenticated avatars; full event / media galleries and pinned-message browsing; server-wide message search; per-room notification preferences and background push; moderation / power-level UI; space creation and editing; accessibility and localization audits; native iOS / Android / desktop packaging; recovery setup edge cases; comprehensive encrypted interoperability and upgrade testing. See [the feature checklist](docs/FEATURES.md), [versioned parity inventory](docs/PARITY.md), and [milestone roadmap](https://github.com/hanthor/fern-matrix/issues/2).
 
-Do not use the demo as evidence of live federation, encryption interoperability, or call media delivery. The browser suite verifies local UI behavior and that the vendored Rust WASM initializes and exposes its builder APIs.
+Do not use the demo as evidence of live federation, encryption interoperability, or call media delivery. The demo browser suite verifies local UI behavior and actual WASM initialization. The separate live suite verifies core SDK adapters against a pinned Synapse server; encrypted messaging and calls remain separate validation gates.
 
 ## Hosting and Pages
 
