@@ -87,13 +87,9 @@ build_one() {
   if [[ -f "$committed_lock" ]]; then lock_seed="$committed_lock"
   elif [[ -f "$bootstrap_lock" ]]; then lock_seed="$bootstrap_lock"
   fi
-  if [[ -f "$committed_lock" || "$repetition" == 2 ]]; then
-    # A lock exists now; prevent dependency drift. Cargo may rewrite workspace
-    # membership while Aurora creates and registers the generated WASM crate.
-    export CARGO_NET_OFFLINE=true
-  else
-    export CARGO_NET_OFFLINE=false
-  fi
+  # Let Cargo fetch the exact registry and Git revisions recorded in the
+  # committed lock. The final byte comparison below rejects any lock drift.
+  export CARGO_NET_OFFLINE=false
 
   # Generate native/TypeScript bindings and the WASM crate first. This pass
   # intentionally skips compiling WASM until the generated crate is a member
