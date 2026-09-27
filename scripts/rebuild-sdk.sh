@@ -81,8 +81,12 @@ prepare_aurora() {
 build_one() {
   local repetition="$1"
   local source_lock
+  local lock_seed=""
   export CARGO_TARGET_DIR="$scratch_root/cargo-target-$repetition"
   prepare_aurora
+  if [[ -f "$committed_lock" ]]; then lock_seed="$committed_lock"
+  elif [[ -f "$bootstrap_lock" ]]; then lock_seed="$bootstrap_lock"
+  fi
   if [[ -f "$committed_lock" || "$repetition" == 2 ]]; then
     # A lock exists now; prevent dependency drift. Cargo may rewrite workspace
     # membership while Aurora creates and registers the generated WASM crate.
@@ -95,6 +99,11 @@ build_one() {
   # intentionally skips compiling WASM until the generated crate is a member
   # of the SDK workspace; the full build below must then succeed.
   yarn --cwd "$aurora_dir" ubrn:web:build:release --no-wasm-pack
+  if [[ -n "$lock_seed" ]]; then
+    # The generate-only command prunes the not-yet-member WASM package from
+    # Cargo.lock. Restore the complete lock before registering/building it.
+    cp "$lock_seed" "$aurora_dir/rust_modules/matrix-rust-sdk/Cargo.lock"
+  fi
   python3 "$repo_root/scripts/set-sdk-workspace-member.py" "$aurora_dir/rust_modules/matrix-rust-sdk/Cargo.toml" --enable
   yarn --cwd "$aurora_dir" ubrn:web:build:release
   local wasm="$aurora_dir/src/generated/wasm-bindgen/index_bg.wasm"
