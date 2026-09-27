@@ -7,9 +7,14 @@
 - Rust manifest: `bindings/matrix-sdk-ffi/Cargo.toml`; generated web workspace manifest: `bindings/wasm/Cargo.toml`
 - Web features: `native-tls`, `js`, `indexeddb`; default features disabled
 - UniFFI runtime: npm `uniffi-bindgen-react-native@0.29.3-1`
+- Generator configured by Aurora: `jhugman/uniffi-bindgen-react-native` commit `5c01f3f7025d069aac1dd1fd51ca72bb76fdb243`. This configured generator is distinct from Fern's published runtime package; a clean generation/build has not yet been verified.
 - WASM SHA256: `f568fe056beb5ef29b9d401e0cd9748a345c3498165d2d1c7dc1e1e6fa2558e2`
 
 This app uses the artifacts from that specific checkout, not the latest Rust SDK release. A release upgrade requires regenerating and testing the bindings and WASM together. The original Aurora experiment is experimental; this application's reuse does not establish production readiness.
+
+`scripts/sdk-lock.json` records all generated bindings, WASM glue, WASM, initialization wrapper and license notice sizes/SHA256 hashes, plus the configured upstream sources and downgrade-patch hash. `npm run sdk:verify` checks the exact file set, contents and runtime package/lock version. Pages and live integration CI run this check. It detects mismatched or incomplete updates; it is not independent binary attestation or proof of reproducible compilation.
+
+Issue [#5](https://github.com/hanthor/fern-matrix/issues/5) remains open for clean source regeneration, pinned build tools and build-dependency lockfiles, upgrade/rollback procedures and rebuild evidence. The current lock describes audited vendored artifacts; do not update its hashes merely to silence a failure. Review new source pins and generated changes, run live/browser interoperability checks, then intentionally refresh the lock as part of the upgrade.
 
 ## Files and changes
 

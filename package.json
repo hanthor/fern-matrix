@@ -10,7 +10,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:integration": "node scripts/test-integration.mjs"
+    "test:integration": "node scripts/test-integration.mjs",
+    "sdk:verify": "node scripts/verify-sdk.mjs"
   },
   "dependencies": {
     "vue": "^3.5.22",

@@ -24,6 +24,7 @@ jobs:
         id: pages
         uses: actions/configure-pages@v5
       - run: npm ci
+      - run: npm run sdk:verify
       - run: npm test
       - name: Build application and offline shell
         run: npm run build

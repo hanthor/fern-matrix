@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "artifactOrigin": "Vendored artifacts from the pinned Aurora checkout; clean source rebuild remains unverified.",
+  "sources": {
+    "aurora": {
+      "repository": "https://github.com/element-hq/aurora",
+      "commit": "95e69fc560e31ea263f3e4d45fb9125557f49ace"
+    },
+    "configuredRustSdk": {
+      "repository": "https://github.com/matrix-org/matrix-rust-sdk",
+      "commit": "73449f4f57e4185c95ee69cf9f3e41d9a0e0857e"
+    },
+    "configuredGenerator": {
+      "repository": "https://github.com/jhugman/uniffi-bindgen-react-native",
+      "commit": "5c01f3f7025d069aac1dd1fd51ca72bb76fdb243"
+    },
+    "uniffiDowngradePatchSha256": "9f4b92319568dc0d6fa783a342eeff0ac7735be28fe86ed3a0e4f7a756c8bb38"
+  },
+  "runtime": {
+    "package": "uniffi-bindgen-react-native",
+    "version": "0.29.3-1"
+  },
+  "compatibilityChanges": [
+    "Generated TypeScript: async public \u2192 public async",
+    "Initialization wrapper: Vite WASM URL import (?url)"
+  ],
+  "files": {
+    "src/sdk/generated/matrix_sdk.ts": {
+      "bytes": 63388,
+      "sha256": "2c77b64ef6498f6d42bc9ecdaf2dd57b22f54c55a2f7a76323e1eee602815e52"
+    },
+    "src/sdk/generated/matrix_sdk_base.ts": {
+      "bytes": 8995,
+      "sha256": "2703bcc065feeabec76af1391d46cebd52cb4d9091fab13648e6a17268ea2814"
+    },
+    "src/sdk/generated/matrix_sdk_common.ts": {
+      "bytes": 5011,
+      "sha256": "1e58225e00ffabf019e7b4804e4c9bae2c81dae03f89c21d9818a812d6908c2b"
+    },
+    "src/sdk/generated/matrix_sdk_crypto.ts": {
+      "bytes": 29070,
+      "sha256": "be49bad15880d0ace40f5847e8e0a3a6610cf30b72ae52434a75ec53c4013aa9"
+    },
+    "src/sdk/generated/matrix_sdk_ffi.ts": {
+      "bytes": 2255479,
+      "sha256": "1acdcf7a1bd01b38a37c5f6cfc158fba3fb0152f739721025241565153746577"
+    },
+    "src/sdk/generated/matrix_sdk_ui.ts": {
+      "bytes": 10002,
+      "sha256": "6ad60e48aa73cc7835079cace9acfc44ce49eb1f65f29fbe2e9d0ca1aa45a2a7"
+    },
+    "src/sdk/generated/wasm-bindgen/index.d.ts": {
+      "bytes": 424900,
+      "sha256": "962960cea130ed4ed832c0a3e8ed0f389a78b714cecb8e923d534e079dc2a3d9"
+    },
+    "src/sdk/generated/wasm-bindgen/index.js": {
+      "bytes": 456146,
+      "sha256": "cec20447466016c782db0b4274ff4d8ab804f164808f6f9c9ffd9346166fb164"
+    },
+    "src/sdk/generated/wasm-bindgen/index_bg.wasm": {
+      "bytes": 50740849,
+      "sha256": "f568fe056beb5ef29b9d401e0cd9748a345c3498165d2d1c7dc1e1e6fa2558e2"
+    },
+    "src/sdk/generated/wasm-bindgen/index_bg.wasm.d.ts": {
+      "bytes": 290450,
+      "sha256": "d4328076d21ace1076fefd8f083f7f71205e94f32e7e1d0c2d2cae3ead3ee84d"
+    },
+    "src/sdk/index.ts": {
+      "bytes": 1742,
+      "sha256": "4cc350aa4116c71d5461bf1c38b9b15fba2443860e9fee172129815db358c1fc"
+    },
+    "LICENSE.txt": {
+      "bytes": 34523,
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+    }
+  }
+}

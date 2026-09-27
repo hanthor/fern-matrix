@@ -25,6 +25,7 @@ jobs:
           cache: pip
           cache-dependency-path: tests/integration/requirements.txt
       - run: npm ci
+      - run: npm run sdk:verify
       - name: Install pinned disposable homeserver
         run: |
           python -m venv .cache/fern-synapse
