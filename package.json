@@ -1,0 +1,33 @@
+{
+  "name": "matrix-frappe-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc --noEmit && vite build && node scripts/build-sw.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "vue": "^3.5.22",
+    "vue-router": "^4.5.1",
+    "frappe-ui": "1.0.0-rc.2",
+    "lucide-vue-next": "^0.468.0",
+    "uniffi-bindgen-react-native": "0.29.3-1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "vite": "^7.3.2",
+    "typescript": "^5.9.2",
+    "vue-tsc": "^3.0.8",
+    "tailwindcss": "^3.4.17",
+    "postcss": "^8.5.6",
+    "autoprefixer": "^10.4.21",
+    "vitest": "^3.2.4",
+    "@playwright/test": "^1.55.1",
+    "@types/node": "^24.5.2"
+  }
+}
