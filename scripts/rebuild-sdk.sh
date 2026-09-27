@@ -84,16 +84,8 @@ build_one() {
   export CARGO_TARGET_DIR="$scratch_root/cargo-target-$repetition"
   prepare_aurora
   if [[ -f "$committed_lock" || "$repetition" == 2 ]]; then
-    # Cargo is kept offline and locked once a lockfile exists. The generated lock
-    # from pass one bootstraps pass two until it is committed for future runs.
-    mkdir -p "$scratch_root/cargo-shim"
-    export FERN_REAL_CARGO="$(rustup which --toolchain 1.94.1 cargo)"
-    cat > "$scratch_root/cargo-shim/cargo" <<'SHIM'
-#!/usr/bin/env bash
-exec "$FERN_REAL_CARGO" --locked "$@"
-SHIM
-    chmod +x "$scratch_root/cargo-shim/cargo"
-    export PATH="$scratch_root/cargo-shim:$PATH"
+    # A lock exists now; prevent dependency drift. Cargo may rewrite workspace
+    # membership while Aurora creates and registers the generated WASM crate.
     export CARGO_NET_OFFLINE=true
   else
     export CARGO_NET_OFFLINE=false
@@ -112,11 +104,13 @@ SHIM
   source_lock="$aurora_dir/rust_modules/matrix-rust-sdk/Cargo.lock"
   [[ -s "$source_lock" ]] || fail "The SDK build did not produce Cargo.lock"
   if [[ "$repetition" == 1 && ! -f "$committed_lock" ]]; then cp "$source_lock" "$bootstrap_lock"; fi
+  if [[ -f "$committed_lock" ]]; then
+    cmp -s -- "$source_lock" "$committed_lock" || fail "Generated Cargo.lock differs from scripts/sdk-build.Cargo.lock"
+  elif [[ "$repetition" == 2 ]]; then
+    cmp -s -- "$source_lock" "$bootstrap_lock" || fail "Second clean build changed the bootstrapped Cargo.lock"
+  fi
   rm -rf -- "$candidate_root/build-$repetition"
   node "$repo_root/scripts/stage-sdk-artifacts.mjs" "$aurora_dir" "$candidate_root/build-$repetition" "$repetition"
-  rm -rf -- "$scratch_root/cargo-shim"
-  export PATH="${PATH#"$scratch_root/cargo-shim:"}"
-  unset FERN_REAL_CARGO
   unset CARGO_NET_OFFLINE
 }
 
