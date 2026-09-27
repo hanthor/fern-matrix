@@ -1,0 +1,3 @@
+src/sdk/generated/** linguist-generated=true -whitespace
+src/sdk/generated/wasm-bindgen/*.wasm binary
+docs/screenshots/*.png binary
