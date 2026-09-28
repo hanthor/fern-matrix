@@ -24,7 +24,7 @@ async function roundTrip(page: Page, bytes: number[]) {
     // toBytes/toBase64 only exist with the fork-candidate artifacts.
     const out = {
       base64: (code as unknown as { toBase64: () => string }).toBase64(),
-      bytes: Array.from((code as unknown as { toBytes: () => ArrayBuffer }).toBytes()),
+      bytes: Array.from(new Uint8Array((code as unknown as { toBytes: () => ArrayBuffer }).toBytes())),
     }
     const again = sdk.QrCodeData.fromBytes(new Uint8Array(out.bytes).buffer)
     return { ...out, serverName: again.serverName() ?? null }
