@@ -58,7 +58,15 @@ prepare_aurora() {
 
   sdk="$aurora_dir/rust_modules/matrix-rust-sdk"
   [[ -d "$sdk/.git" ]] || fail "UBRN checkout did not create the configured Matrix Rust SDK"
-  [[ "$(git -C "$sdk" rev-parse HEAD)" == "$rust_commit" ]] || fail "Matrix Rust SDK source commit mismatch"
+  # CI PROBE ONLY (ci/qr-bytes-probe, do not merge): build the fork backport
+  # branch carrying QrCodeData::to_bytes/to_base64 instead of the pinned
+  # commit, to validate the new FFI methods through Fern's real stack.
+  if [[ -n "${FERN_SDK_PROBE_REF:-}" ]]; then
+    git -C "$sdk" fetch --depth 1 https://github.com/hanthor/matrix-rust-sdk.git "$FERN_SDK_PROBE_REF" || fail "Probe SDK ref fetch failed"
+    git -C "$sdk" checkout --detach FETCH_HEAD || fail "Probe SDK ref checkout failed"
+  else
+    [[ "$(git -C "$sdk" rev-parse HEAD)" == "$rust_commit" ]] || fail "Matrix Rust SDK source commit mismatch"
+  fi
   generator="$aurora_dir/node_modules/uniffi-bindgen-react-native"
   grep -Fq -- "uniffi-bindgen-react-native#${generator_commit}" "$aurora_dir/yarn.lock" || fail "Frozen Yarn lock does not pin the configured UniFFI generator commit"
   [[ -f "$generator/crates/ubrn_cli/Cargo.toml" ]] || fail "The pinned Yarn install has no UniFFI generator CLI manifest"

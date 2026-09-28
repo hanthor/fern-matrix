@@ -1,6 +1,11 @@
 name: Reproducible Rust SDK rebuild
 on:
   workflow_dispatch:
+    inputs:
+      sdk_probe_ref:
+        description: 'Probe SDK ref (branch) to build instead of the pinned commit; empty keeps pins'
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -27,6 +32,7 @@ jobs:
       - name: Rebuild twice from pinned Rust sources
         env:
           SDK_CANDIDATE_DIR: ${{ runner.temp }}/fern-sdk-candidates
+          FERN_SDK_PROBE_REF: ${{ inputs.sdk_probe_ref }}
         run: bash scripts/rebuild-sdk.sh
       - name: Upload reviewed rebuild candidates
         uses: actions/upload-artifact@v4
