@@ -61,9 +61,15 @@ prepare_aurora() {
   # CI PROBE ONLY (ci/qr-bytes-probe, do not merge): build the fork backport
   # branch carrying QrCodeData::to_bytes/to_base64 instead of the pinned
   # commit, to validate the new FFI methods through Fern's real stack.
+  # The backport differs from the pinned commit in exactly one file, so copy
+  # that file from a separate clone: fetching into ubrn's shallow checkout
+  # trips "shallow file has changed since we read it".
   if [[ -n "${FERN_SDK_PROBE_REF:-}" ]]; then
-    git -C "$sdk" fetch --depth 1 https://github.com/hanthor/matrix-rust-sdk.git "$FERN_SDK_PROBE_REF" || fail "Probe SDK ref fetch failed"
-    git -C "$sdk" checkout --detach FETCH_HEAD || fail "Probe SDK ref checkout failed"
+    probe_work="$scratch_root/probe-sdk"
+    git clone --depth 1 --branch "$FERN_SDK_PROBE_REF" https://github.com/hanthor/matrix-rust-sdk.git "$probe_work" || fail "Probe SDK clone failed"
+    probe_file='bindings/matrix-sdk-ffi/src/qr_code.rs'
+    cp "$probe_work/$probe_file" "$sdk/$probe_file" || fail "Probe SDK file copy failed"
+    [[ "$(git -C "$sdk" diff --name-only)" == "$probe_file" ]] || fail "Probe SDK worktree differs outside $probe_file"
   else
     [[ "$(git -C "$sdk" rev-parse HEAD)" == "$rust_commit" ]] || fail "Matrix Rust SDK source commit mismatch"
   fi
