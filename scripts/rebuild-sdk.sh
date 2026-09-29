@@ -66,6 +66,7 @@ prepare_aurora() {
   # trips "shallow file has changed since we read it".
   if [[ -n "${FERN_SDK_PROBE_REF:-}" ]]; then
     probe_work="$scratch_root/probe-sdk"
+    rm -rf -- "$probe_work"
     git clone --depth 1 --branch "$FERN_SDK_PROBE_REF" https://github.com/hanthor/matrix-rust-sdk.git "$probe_work" || fail "Probe SDK clone failed"
     probe_file='bindings/matrix-sdk-ffi/src/qr_code.rs'
     cp "$probe_work/$probe_file" "$sdk/$probe_file" || fail "Probe SDK file copy failed"
