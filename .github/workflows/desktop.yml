@@ -1,0 +1,83 @@
+name: Desktop packaging
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install webview system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm run sdk:verify
+      - run: npm test
+      - run: npm run build
+      - name: Install pinned Tauri CLI
+        run: cargo install --locked tauri-cli --version 2.12.0
+      - name: Bundle Linux desktop packages
+        run: cargo tauri build --debug --bundles deb,appimage
+        working-directory: src-tauri
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: fern-matrix-linux
+          path: |
+            src-tauri/target/debug/bundle/deb/*.deb
+            src-tauri/target/debug/bundle/appimage/*.AppImage
+          if-no-files-found: error
+  linux-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install webview system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm run sdk:verify
+      - run: npm test
+      - run: npm run build
+      - name: Install pinned Tauri CLI
+        run: cargo install --locked tauri-cli --version 2.12.0
+      - name: Bundle signed Linux packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: cargo tauri build --bundles deb,appimage,updater
+        working-directory: src-tauri
+      - name: Compose updater manifest and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/compose-updater.mjs "${GITHUB_REF_NAME}"
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" \
+            src-tauri/target/release/bundle/deb/*.deb \
+            src-tauri/target/release/bundle/appimage/*.AppImage \
+            src-tauri/target/release/bundle/updater/*.AppImage.tar.gz \
+            src-tauri/target/release/bundle/updater/*.AppImage.tar.gz.sig \
+            src-tauri/target/release/bundle/updater/latest.json
