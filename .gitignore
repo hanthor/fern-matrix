@@ -5,3 +5,5 @@ playwright-report/
 .env
 .cache/
 __pycache__/
+src-tauri/target/
+src-tauri/gen/android/
