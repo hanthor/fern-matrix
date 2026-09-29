@@ -110,7 +110,7 @@ jobs:
           mkdir -p "$(dirname "${SIGNED_APK}")"
           "${BT}/zipalign" -f 4 "${UNSIGNED_APK}" /tmp/fern-aligned.apk
           "${BT}/apksigner" sign --ks /tmp/fern-upload.keystore \
-            --ks-pass:env ANDROID_KEYSTORE_PASSWORD --key-pass:env ANDROID_KEY_PASSWORD \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
             --ks-key-alias "${ANDROID_KEY_ALIAS}" --out "${SIGNED_APK}" /tmp/fern-aligned.apk
           "${BT}/apksigner" verify --print-certs "${SIGNED_APK}"
           UNSIGNED_AAB=src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
