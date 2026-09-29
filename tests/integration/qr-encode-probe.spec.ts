@@ -39,7 +39,8 @@ test('fork QrCodeData serializes back to identical bytes and base64', async ({ b
     const raw = loginBytes(4, 'http://127.0.0.1:9/x', 'example:x')
     const got = await roundTrip(page, raw)
     expect(got.bytes).toEqual(raw)
-    expect(got.base64).toBe(Buffer.from(raw).toString('base64'))
+    // The SDK's canonical base64 is unpadded; Node pads by default.
+    expect(got.base64).toBe(Buffer.from(raw).toString('base64').replace(/=+$/, ''))
     expect(got.serverName).toBe('example:x')
   } finally {
     await context.close()
