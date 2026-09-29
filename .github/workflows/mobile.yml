@@ -95,15 +95,31 @@ jobs:
         run: |
           test -n "${ANDROID_KEYSTORE_BASE64}" || { echo "missing ANDROID_KEYSTORE_BASE64 secret"; exit 1; }
           echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d > /tmp/fern-upload.keystore
-          cat > src-tauri/gen/android/keystore.properties <<EOF
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
-          storeFile=/tmp/fern-upload.keystore
-          EOF
-      - name: Build signed release APK and AAB
+      - name: Build unsigned release APK and AAB
         run: cargo tauri android build --apk --aab
         working-directory: src-tauri
+      - name: Sign release APK and AAB with the upload key
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          BT="${ANDROID_HOME}/build-tools/34.0.0"
+          UNSIGNED_APK=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+          SIGNED_APK=src-tauri/gen/android/app/build/outputs/apk/release/app-universal-release.apk
+          mkdir -p "$(dirname "${SIGNED_APK}")"
+          "${BT}/zipalign" -f 4 "${UNSIGNED_APK}" /tmp/fern-aligned.apk
+          "${BT}/apksigner" sign --ks /tmp/fern-upload.keystore \
+            --ks-pass:env ANDROID_KEYSTORE_PASSWORD --key-pass:env ANDROID_KEY_PASSWORD \
+            --ks-key-alias "${ANDROID_KEY_ALIAS}" --out "${SIGNED_APK}" /tmp/fern-aligned.apk
+          "${BT}/apksigner" verify --print-certs "${SIGNED_APK}"
+          UNSIGNED_AAB=src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
+          SIGNED_AAB=src-tauri/gen/android/app/build/outputs/bundle/release/app-universal-release.aab
+          mkdir -p "$(dirname "${SIGNED_AAB}")"
+          jarsigner -keystore /tmp/fern-upload.keystore -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            -keypass "${ANDROID_KEY_PASSWORD}" -signedjar "${SIGNED_AAB}" "${UNSIGNED_AAB}" "${ANDROID_KEY_ALIAS}"
+          jarsigner -verify "${SIGNED_AAB}"
+          shred -u /tmp/fern-upload.keystore /tmp/fern-aligned.apk
       - name: Upload signed release artifacts
         uses: actions/upload-artifact@v4
         with:
