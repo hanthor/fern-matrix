@@ -8,9 +8,8 @@
     },
     "configuredRustSdk": {
       "repository": "https://github.com/matrix-org/matrix-rust-sdk",
-      "commit": "73449f4f57e4185c95ee69cf9f3e41d9a0e0857e"
+      "commit": "ee7ece4019d367f9eaba2408b34766321562f8bf"
     },
-    "rustSdkBuildPatchSha256": "ccae395e4877bb1864eeb2abbc9611df66c9533318ecba943133ea157e7de37c",
     "configuredGenerator": {
       "repository": "https://github.com/jhugman/uniffi-bindgen-react-native",
       "commit": "5c01f3f7025d069aac1dd1fd51ca72bb76fdb243"

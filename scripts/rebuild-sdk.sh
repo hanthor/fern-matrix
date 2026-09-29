@@ -7,10 +7,9 @@ tool_root="$scratch_root/tools"
 aurora_dir="$scratch_root/aurora"
 candidate_root="${SDK_CANDIDATE_DIR:-$repo_root/.sdk-candidates}"
 aurora_commit=95e69fc560e31ea263f3e4d45fb9125557f49ace
-rust_commit=73449f4f57e4185c95ee69cf9f3e41d9a0e0857e
+rust_commit=ee7ece4019d367f9eaba2408b34766321562f8bf
 generator_commit=5c01f3f7025d069aac1dd1fd51ca72bb76fdb243
 patch_sha=9f4b92319568dc0d6fa783a342eeff0ac7735be28fe86ed3a0e4f7a756c8bb38
-rust_build_patch_sha=ccae395e4877bb1864eeb2abbc9611df66c9533318ecba943133ea157e7de37c
 
 mkdir -p "$scratch_root" "$tool_root" "$candidate_root"
 cleanup() { rm -rf -- "$scratch_root"; }
@@ -58,6 +57,13 @@ prepare_aurora() {
 
   sdk="$aurora_dir/rust_modules/matrix-rust-sdk"
   [[ -d "$sdk/.git" ]] || fail "UBRN checkout did not create the configured Matrix Rust SDK"
+  # Aurora's ubrn.config.yaml still points at its own Rust SDK rev, which
+  # predates upstream matrix-org/matrix-rust-sdk#7149 (QrCodeData.to_base64,
+  # merged 2026-09-29). Advance the checkout to the reviewed merge commit.
+  if [[ "$(git -C "$sdk" rev-parse HEAD)" != "$rust_commit" ]]; then
+    git -C "$sdk" fetch --depth 1 origin "$rust_commit" || fail "Cannot fetch the reviewed Rust SDK commit"
+    git -C "$sdk" checkout --detach "$rust_commit" || fail "Cannot check out the reviewed Rust SDK commit"
+  fi
   [[ "$(git -C "$sdk" rev-parse HEAD)" == "$rust_commit" ]] || fail "Matrix Rust SDK source commit mismatch"
   generator="$aurora_dir/node_modules/uniffi-bindgen-react-native"
   grep -Fq -- "uniffi-bindgen-react-native#${generator_commit}" "$aurora_dir/yarn.lock" || fail "Frozen Yarn lock does not pin the configured UniFFI generator commit"
@@ -66,10 +72,10 @@ prepare_aurora() {
   printf '%s  %s\n' "$patch_sha" "$patch" | sha256sum --check --status || fail "UniFFI compatibility patch changed"
   git -C "$sdk" apply --check "$patch"
   git -C "$sdk" apply "$patch"
-  rust_build_patch="$repo_root/patches/matrix-sdk-recursion-limit.patch"
-  printf '%s  %s\n' "$rust_build_patch_sha" "$rust_build_patch" | sha256sum --check --status || fail "Rust recursion-limit compatibility patch changed"
-  git -C "$sdk" apply --check "$rust_build_patch"
-  git -C "$sdk" apply "$rust_build_patch"
+  # The old recursion-limit patch is retired: upstream now carries
+  # #![recursion_limit = "256"] in crates/matrix-sdk/src/lib.rs itself.
+  # Keep a hard assertion so a future upstream removal fails loudly.
+  grep -Fq '#![recursion_limit = "256"]' "$sdk/crates/matrix-sdk/src/lib.rs" || fail "Upstream lost the matrix-sdk recursion limit"
   python3 "$repo_root/scripts/set-sdk-workspace-member.py" "$sdk/Cargo.toml"
   if [[ -f "$committed_lock" ]]; then
     cp "$committed_lock" "$sdk/Cargo.lock"

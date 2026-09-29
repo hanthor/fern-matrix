@@ -9,11 +9,6 @@ const lock = JSON.parse(await readFile(new URL('./sdk-lock.json', import.meta.ur
 if (lock.schemaVersion !== 1) throw new Error('Unsupported SDK lock schema')
 const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 const packageLock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'))
-const sourceBuildPatch = join(root, 'patches/matrix-sdk-recursion-limit.patch')
-const sourceBuildPatchHash = createHash('sha256').update(await readFile(sourceBuildPatch)).digest('hex')
-if (sourceBuildPatchHash !== lock.sources.rustSdkBuildPatchSha256) {
-  throw new Error('Rust SDK compatibility patch differs from its audited source lock.')
-}
 const runtime = lock.runtime
 if (packageJson.dependencies[runtime.package] !== runtime.version ||
     packageLock.packages[`node_modules/${runtime.package}`]?.version !== runtime.version) {

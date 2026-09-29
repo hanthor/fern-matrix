@@ -10,7 +10,7 @@ const second = JSON.parse(await readFile(secondPath, 'utf8'))
 for (const key of ['auroraCommit', 'rustSdkCommit', 'generatorCommit', 'nodeVersion', 'yarnVersion', 'rustcVersion', 'cargoVersion', 'wasmBindgenVersion', 'binaryenVersion']) {
   if (first[key] !== second[key]) throw new Error(`Build inputs differ: ${key}`)
 }
-for (const key of ['cargoLockSha256', 'webManifestSha256', 'downgradePatchSha256', 'rustSdkBuildPatchSha256']) {
+for (const key of ['cargoLockSha256', 'webManifestSha256', 'downgradePatchSha256', 'rustSdkBuildPatch']) {
   if (first[key] !== second[key]) {
     throw new Error(`Source build input changed between runs: ${key} (${first[key]} != ${second[key]})`)
   }
