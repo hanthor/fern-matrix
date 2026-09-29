@@ -19,7 +19,7 @@
       "endpoints": [
         "https://github.com/hanthor/fern-matrix/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwNDM3MTFGMkJBN0M3QUIKUldTcng2Y3JIM0ZEa0tSYm16TzQxTjlEZ3UxbFRBMjNGckl4a2ZPRzhwL0VGNkcrWVpSWXZhUnQK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwNjRFRjc4MDlCMTUzN0IKUldSN1U3RUplTzlrOE9SbkRmaXNzbG9UbWlXelZYdU9PRnNFaURzUDVnNnpHeTJ1QWRZTEU4UGsK"
     }
   },
   "app": {
