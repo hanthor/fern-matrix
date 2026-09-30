@@ -1,0 +1,61 @@
+name: Nightly APK
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: nightly-apk
+  cancel-in-progress: false
+jobs:
+  nightly-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android platform, build-tools and NDK
+        run: |
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/26.1.10909125" >> "${GITHUB_ENV}"
+      - run: npm ci
+      - run: npm run sdk:verify
+      - run: npm test
+      - run: npm run build
+      - name: Install pinned Tauri CLI
+        run: cargo install --locked tauri-cli --version 2.12.0
+      - name: Init Android project
+        run: cargo tauri android init
+        working-directory: src-tauri
+      - name: Build debug APK
+        run: cargo tauri android build --debug
+        working-directory: src-tauri
+      - name: Publish to the rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BUILT=$(ls src-tauri/gen/android/app/build/outputs/apk/*/*/*.apk | head -1)
+          test -n "${BUILT}" || { echo "no debug APK built"; exit 1; }
+          cp "${BUILT}" fern-matrix-nightly.apk
+          gh release view nightly >/dev/null 2>&1 || \
+            gh release create nightly --title "Nightly build" --prerelease \
+              --notes "Rolling nightly debug APK from main (replaced every night, testing-signed, not for trust decisions)."
+          gh release edit nightly --notes "Rolling nightly debug APK from main, built $(date -u +%Y-%m-%d) (replaced every night, testing-signed, not for trust decisions)."
+          gh release upload nightly fern-matrix-nightly.apk --clobber
