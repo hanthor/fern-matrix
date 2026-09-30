@@ -26,6 +26,8 @@ attrs==26.1.0
     #   service-identity
     #   treq
     #   twisted
+authlib==1.8.0
+    # via -r tests/integration/requirements.in
 automat==25.4.16
     # via twisted
 bcrypt==5.0.0
@@ -51,6 +53,8 @@ constantly==23.10.4
     # via twisted
 cryptography==50.0.1
     # via
+    #   authlib
+    #   joserfc
     #   matrix-synapse
     #   pyopenssl
     #   service-identity
@@ -86,6 +90,8 @@ incremental==24.11.0
     #   twisted
 jinja2==3.1.6
     # via matrix-synapse
+joserfc==1.7.5
+    # via authlib
 jsonschema==4.26.0
     # via
     #   matrix-nio

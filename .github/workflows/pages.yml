@@ -30,6 +30,8 @@ jobs:
         run: npm run build
         env:
           FERN_BASE_PATH: ${{ steps.pages.outputs.base_path }}/
+          # The Pages site is the dedicated demo instance: it ships the tour.
+          VITE_FERN_DEMO: '1'
       - name: Upload static site
         uses: actions/upload-pages-artifact@v4
         with:

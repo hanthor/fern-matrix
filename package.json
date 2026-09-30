@@ -11,25 +11,36 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:integration": "node scripts/test-integration.mjs",
+    "test:sso": "node scripts/test-sso.mjs",
+    "test:oidc": "node scripts/test-oidc.mjs",
     "sdk:verify": "node scripts/verify-sdk.mjs"
   },
   "dependencies": {
-    "vue": "^3.5.22",
-    "vue-router": "^4.5.1",
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-deep-link": "^2.5.0",
+    "@tauri-apps/plugin-opener": "^2.6.0",
+    "@tauri-apps/plugin-process": "^2.3.0",
+    "@tauri-apps/plugin-updater": "^2.13.0",
     "frappe-ui": "1.0.0-rc.2",
+    "jsqr": "^1.4.0",
     "lucide-vue-next": "^0.468.0",
-    "uniffi-bindgen-react-native": "0.29.3-1"
+    "uniffi-bindgen-react-native": "0.29.3-1",
+    "vue": "^3.5.22",
+    "vue-i18n": "^11.4.12",
+    "vue-router": "^4.5.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.1",
-    "vite": "^7.3.2",
-    "typescript": "^5.9.2",
-    "vue-tsc": "^3.0.8",
-    "tailwindcss": "^3.4.17",
-    "postcss": "^8.5.6",
-    "autoprefixer": "^10.4.21",
-    "vitest": "^3.2.4",
     "@playwright/test": "^1.55.1",
-    "@types/node": "^24.5.2"
+    "@types/node": "^24.5.2",
+    "@types/qrcode": "^1.5.6",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "qrcode": "^1.5.4",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.9.2",
+    "vite": "^7.3.2",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.0.8"
   }
 }
