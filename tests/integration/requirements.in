@@ -1,3 +1,5 @@
 # Test fixture only; does not become an application backend.
 matrix-synapse==1.161.0
 matrix-nio[e2e]==0.26.0
+# OIDC provider support in the disposable Synapse fixtures (SSO tests).
+authlib

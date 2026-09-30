@@ -76,13 +76,14 @@ def main():
             if not versions.get("unstable_features", {}).get("org.matrix.simplified_msc3575"):
                 raise RuntimeError("Pinned Synapse does not advertise native sliding sync")
             users = []
-            for username in ["alice", "bob", "reference"]:
+            for username, admin in [("alice", False), ("bob", False), ("reference", False), ("admin", True)]:
                 password = secrets.token_urlsafe(32)
                 nonce = api(base, "/_synapse/admin/v1/register")["nonce"]
                 mac = hmac.new(shared_secret.encode(), digestmod=hashlib.sha1)
-                mac.update(b"\0".join([nonce.encode(), username.encode(), password.encode(), b"notadmin"]))
+                mac.update(b"\0".join([nonce.encode(), username.encode(), password.encode(),
+                                        b"admin" if admin else b"notadmin"]))
                 registered = api(base, "/_synapse/admin/v1/register", {
-                    "nonce": nonce, "username": username, "password": password, "admin": False,
+                    "nonce": nonce, "username": username, "password": password, "admin": admin,
                     "mac": mac.hexdigest(),
                 })
                 users.append({"username": username, "password": password, "userId": registered["user_id"],

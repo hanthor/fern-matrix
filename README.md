@@ -28,6 +28,12 @@ npm run preview
 
 Browser tests use Playwright's installed Chromium, or `FERN_CHROMIUM_PATH` when supplied. For a new machine, run `npx playwright install chromium`. `docs/DEVELOPMENT.md` describes the tests and architecture. The [live integration guide](docs/INTEGRATION.md) explains the disposable Synapse environment and `npm run test:integration`.
 
+## Install
+
+[v0.1.0](https://github.com/hanthor/fern-matrix/releases/tag/v0.1.0) ships signed Linux (deb, AppImage with auto-update) and Android (APK, AAB) builds from CI. Releases are cut by pushing a version tag — `node scripts/cut-release.mjs 0.1.0` sync-checks `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` first — which drives the signed desktop and mobile pipelines (see `docs/NATIVE.md`).
+
+**Testing signatures.** This release is signed with testing-only keys so the pipelines run end to end: a local minisign keypair for the desktop updater and an upload keystore for Android, held as CI secrets. They prove the mechanism, not a trust chain — rotate every key and secret before any production release or store upload.
+
 ## Implemented
 
 | Area | Behavior |
@@ -41,15 +47,16 @@ Browser tests use Playwright's installed Chromium, or `FERN_CHROMIUM_PATH` when 
 | Discovery | Public homeserver room search and pagination; room / person quick switch; loaded-message search |
 | Room details | Topic, room ID, members, shared files and invitations |
 | Security | Device information, fingerprints, existing-key recovery, new recovery setup when no backup exists, emoji / number device verification |
-| Calling | Element Call iframe connected to the Rust SDK widget driver, constrained capabilities and checked postMessage origin/source; requires MatrixRTC infrastructure |
-| Preferences | Light / dark / system appearance, compact messages, display name editing |
-| Notifications | Browser notifications for the selected room while the app is open |
-| Installation | Web app manifest, app icons, versioned offline shell; SDK WASM cached after first use |
+| Calling | Preloaded Element Call driven through the Rust SDK widget driver: Fern's lobby is the single prescreen, host join on first widget traffic, constrained capabilities and checked postMessage origin/source; requires MatrixRTC infrastructure, live media validation pending |
+| Preferences | Light / dark / system appearance, Fern/Ocean/Clay/Ochre accent themes, compact messages, display name editing, persistent English/German language preference |
+| Notifications | Browser notifications for the selected room while the app is open; per-room and per-account rules, quiet accounts |
+| Installation | Web app manifest, app icons, versioned offline shell; SDK WASM cached after first use; signed Linux deb/AppImage and Android APK/AAB from CI releases |
+| Localization | English plus German catalogs across login, composer, timeline, sidebar, search, room details, settings and dialogs (toasts and some screens still English); no RTL yet |
 | Hosting | GitHub Pages workflow and nginx container configuration |
 
-## Element X parity still to implement
+## Still to implement
 
-OIDC / SSO and QR login; full incoming-call / ringing lifecycle; voice recording and location sharing; rich text / mention autocomplete; threads; authenticated avatars; full event / media galleries and pinned-message browsing; server-wide message search; per-room notification preferences and background push; moderation / power-level UI; space creation and editing; accessibility and localization audits; native iOS / Android / desktop packaging; recovery setup edge cases; comprehensive encrypted interoperability and upgrade testing. See [the feature checklist](docs/FEATURES.md), [versioned parity inventory](docs/PARITY.md), and [milestone roadmap](https://github.com/hanthor/fern-matrix/issues/2).
+Incoming-call ringing and call-state routing; live two-party/group call media validation with a second client; background push; second-homeserver (Spindle) interop; RTL layouts and remaining English-only surfaces; independent security review; mobile lifecycle, background execution and store distribution; hardware-backed biometric unlock; external-IdP end-to-end login. See [the feature checklist](docs/FEATURES.md), [versioned parity inventory](docs/PARITY.md), and [milestone roadmap](https://github.com/hanthor/fern-matrix/issues/2).
 
 Do not use the demo as evidence of live federation, encryption interoperability, or call media delivery. The demo browser suite verifies local UI behavior and actual WASM initialization. The separate live suite verifies core SDK adapters against a pinned Synapse server; encrypted messaging and calls remain separate validation gates.
 
@@ -75,7 +82,13 @@ Set `VITE_ELEMENT_CALL_URL` at build time for a self-hosted calling service and 
 
 ## Local data
 
-Messages and crypto keys are stored by the SDK in account-specific IndexedDB databases. Browser session credentials and the IndexedDB passphrase are stored in origin-local storage to support restoration. The passphrase is **not** protection against other scripts running on that origin. Use a dedicated trusted origin for sensitive accounts; GitHub project Pages share an origin with your other project sites. Drafts are local. The service worker caches only public app assets, never Matrix API responses or tokens. Logging out removes the session and stops its listeners; encrypted SDK database cleanup is not yet implemented. Keep a recovery key before clearing browser data.
+Messages and crypto keys are stored by the SDK in account-specific IndexedDB databases (`fern-<account>`). Browser session credentials and the IndexedDB passphrase live in origin-local storage (`fern.sessions.v1`) to support restoration, alongside per-room drafts (`fern.draft.<account>/…`).
+
+**Threat model.** Browser storage is convenient, not a vault: anything that can run script on this origin (XSS in any app sharing the origin, a malicious extension with page access, or anyone with access to the unlocked browser profile) can read sessions, passphrases and drafts. The passphrase encrypts the IndexedDB store at rest against offline disk inspection only. Mitigations in this design: per-account databases and key prefixes so one account's removal cannot touch another's; no credentials in URLs, logs, screenshots, traces or diagnostics; the service worker caches only versioned public app assets and never Matrix API responses, media or tokens; logout/removal stops sync listeners and timers so stale callbacks cannot resurrect a removed session, and session-restore requests for removed accounts are refused by the keychain delegate. Use a dedicated trusted origin for sensitive accounts; GitHub project Pages share an origin with your other project sites.
+
+**Device and key-sharing policy.** Live megolm sessions are shared with member devices as they join (verified or not), so a new device reads post-join traffic immediately; trust gates only the authenticity shields, never delivery. Superseded sessions after rotation are never pushed and key requests from unverified devices go unanswered, same-user or cross-user — both pinned live. The backstop for a wiped device is the encrypted server backup: setup refuses when a backup exists, reset is explicit with consequences, the old key stops working after rotation, and the new backup re-uploads known keys so migration loses no history. Cross-user verification needs user-verification bindings the SDK build does not expose, so independent-client verification awaits Element X qualification.
+
+**Sign out versus remove.** *Sign out* revokes the server session when reachable and always erases the local account; if the server is unreachable it still erases locally and says so. *Remove* (Settings → Accounts → Remove) erases the local account without contacting the server, for sessions that are already invalid. Both erase the same local data: credentials and passphrase, drafts, the encrypted IndexedDB database (crypto store, persisted event caches, downloaded media), in-memory caches and blob URLs, and SDK listeners. Removing one account never deletes or exposes another's. Keep a recovery key before clearing browser data: erasure is permanent and encrypted history cannot be restored without it.
 
 ## SDK provenance and license
 

@@ -34,5 +34,24 @@ jobs:
       - run: npm test
       - run: npm run test:e2e
       - run: npm run test:integration
+      - run: npm run test:sso
       - run: npm run build
+      # Intentionally no trace/HAR/server-log upload: those can expose sessions.
+  live-oidc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Build disposable Spindle with built-in OIDC
+        run: |
+          git clone --depth 1 https://github.com/tuna-os/spindle.git .cache/spindle
+          git -C .cache/spindle rev-parse HEAD
+          cargo build --release --manifest-path .cache/spindle/Cargo.toml -p spindle-server --bin spindle
+      - run: FERN_SPINDLE_BIN=$PWD/.cache/spindle/target/release/spindle npm run test:oidc
       # Intentionally no trace/HAR/server-log upload: those can expose sessions.
