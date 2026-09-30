@@ -4,6 +4,8 @@ A calm, responsive, multi-account Matrix client built with Vue 3, Frappe UI, and
 
 **[Open Fern](https://hanthor.github.io/fern-matrix/) · [Source](https://github.com/hanthor/fern-matrix) · [Roadmap](https://github.com/hanthor/fern-matrix/issues/2)**
 
+**Get Fern:** [Android APK](https://github.com/hanthor/fern-matrix/releases/latest/download/app-universal-release.apk) · [Linux builds and everything else](https://github.com/hanthor/fern-matrix/releases/latest) (testing-signed — see Install before trusting or redistributing)
+
 ![Fern desktop interface](docs/screenshots/desktop.png)
 
 Fern is an early implementation, **not a finished Element X replacement**. The interactive local demo works without credentials. Live messaging uses the Rust SDK; there is no Matrix JavaScript SDK fallback. Core login, sync and messaging adapters are tested against disposable Synapse with two browser clients. Independent encryption interoperability and calling/verification flows still need validation with other clients.
@@ -17,7 +19,7 @@ npm ci
 npm run dev
 ```
 
-Open http://localhost:5173. The default view is explicitly labeled **Local demo**. Add your account from the account rail or “Connect your account”. The homeserver must support password authentication and native sliding sync. Multiple accounts sync independently and use separate IndexedDB stores.
+Open http://localhost:5173. The default view prompts you to connect an account or create one (the tour demo lives on the hosted instance, or run with `VITE_FERN_DEMO=1 npm run dev` / `?demo=1`). The homeserver must support password authentication and native sliding sync. Multiple accounts sync independently and use separate IndexedDB stores.
 
 ```sh
 npm test
