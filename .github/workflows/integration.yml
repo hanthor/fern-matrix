@@ -49,8 +49,15 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - name: Build disposable Spindle with built-in OIDC
+        env:
+          # Pinned to spindle main with the tracing-opentelemetry 0.34 fix
+          # (tuna-os/spindle#517); bump deliberately, never --depth 1 HEAD.
+          SPINDLE_REV: fd256b00c56ebf41459c579358c22f05ce3eed61
         run: |
-          git clone --depth 1 https://github.com/tuna-os/spindle.git .cache/spindle
+          git init -q .cache/spindle
+          git -C .cache/spindle remote add origin https://github.com/tuna-os/spindle.git
+          git -C .cache/spindle fetch -q --depth 1 origin "$SPINDLE_REV"
+          git -C .cache/spindle checkout -q FETCH_HEAD
           git -C .cache/spindle rev-parse HEAD
           cargo build --release --manifest-path .cache/spindle/Cargo.toml -p spindle-server --bin spindle
       - run: FERN_SPINDLE_BIN=$PWD/.cache/spindle/target/release/spindle npm run test:oidc
