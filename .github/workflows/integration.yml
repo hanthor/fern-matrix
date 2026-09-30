@@ -52,6 +52,12 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/tuna-os/spindle.git .cache/spindle
           git -C .cache/spindle rev-parse HEAD
+          # Upstream skew: tracing-opentelemetry 0.32 drags opentelemetry 0.31
+          # while the rest of the tree is 0.33 (E0277: SdkTracer does not
+          # implement the 0.31 Tracer). Align it with the 0.33 family until
+          # upstream bumps the requirement (hanthor/fern-matrix#58).
+          sed -i 's/^tracing-opentelemetry = "0.32"$/tracing-opentelemetry = "0.34"/' .cache/spindle/crates/spindle-server/Cargo.toml
+          grep '^tracing-opentelemetry' .cache/spindle/crates/spindle-server/Cargo.toml
           cargo build --release --manifest-path .cache/spindle/Cargo.toml -p spindle-server --bin spindle
       - run: FERN_SPINDLE_BIN=$PWD/.cache/spindle/target/release/spindle npm run test:oidc
       # Intentionally no trace/HAR/server-log upload: those can expose sessions.
