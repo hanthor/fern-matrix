@@ -30,7 +30,7 @@ test('location share preview and send', async ({ page }) => {
   await openShare(page)
   const panel = page.getByRole('region', { name: 'Location sharing' })
   await expect(panel.getByText('Location shared: 53.4794, -2.2453 (±25m)')).toBeVisible()
-  await panel.getByRole('textbox', { name: 'Location description' }).fill('Test café')
+  await panel.getByRole('textbox', { name: 'Add a description (optional)' }).fill('Test café')
   await panel.getByRole('button', { name: 'Send location', exact: true }).click()
   const sent = page.locator('article').filter({ hasText: 'Test café' })
   await expect(sent).toHaveCount(1)

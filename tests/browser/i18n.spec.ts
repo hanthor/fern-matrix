@@ -28,7 +28,7 @@ test('language switcher retranslates pilot surfaces', async ({ page }) => {
   await page.getByRole('combobox', { name: 'Akzent' }).click()
   await page.getByRole('option', { name: 'Ocean' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-accent', 'ocean')
-  expect(await page.locator('.fern-logo').evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(47, 93, 98)')
+  await expect.poll(async () => page.locator('.fern-logo').evaluate(el => getComputedStyle(el).backgroundColor), { timeout: 5000 }).toBe('rgb(47, 93, 98)')
   await page.getByRole('combobox', { name: 'Akzent' }).click()
   await page.getByRole('option', { name: 'Fern' }).click()
   await expect(page.locator('html')).not.toHaveAttribute('data-accent')

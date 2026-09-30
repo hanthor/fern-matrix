@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test'
 // instead of loading the tour; the escape hatch seeds the demo in place.
 test('login gate prompts for an account with a demo escape hatch', async ({ page }) => {
   const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
+  page.on('pageerror', error => errors.push(error.stack ?? error.message))
   await page.goto('/?demo=0')
   await expect(page.getByRole('heading', { name: 'Good conversations start here' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect your account' })).toBeVisible()

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { Button, ContextMenu, Dropdown, Tooltip } from 'frappe-ui'
+import { Button, Dropdown, Tooltip } from 'frappe-ui'
 import { Reply, SmilePlus, MoreHorizontal, FileText, Download, CheckCheck, Pencil, Pin, Trash2, Copy, MessageSquare, Play, MapPin, Forward, Share2, Flag } from 'lucide-vue-next'
 import UserAvatar from './UserAvatar.vue'
 import type { Message } from '../types'
@@ -58,13 +58,17 @@ function swipeEnd(event: PointerEvent, cancel = false) {
   swipeArmed.value = false
   if (!cancel && active && swipeReplyIntent(dx, dy, dt)) emit('reply', props.message)
 }
-// Long-press opens the same actions menu as the hover button: the touch path
-// for the menu on phones (right-click arrives as contextmenu on desktop and
-// long-press on Android, both handled by ContextMenu below). The manual timer
-// covers engines that never fire contextmenu for a stationary touch; the
-// shared options array keeps both menus identical. Long-pressing a link opens
-// the message menu rather than the link menu, matching native chat apps.
-const menuOpen = ref(false)
+// Long-press opens the hover-button menu: the touch path for message actions
+// on phones (right-click arrives as contextmenu on desktop, the manual timer
+// covers engines that never fire contextmenu for a stationary touch). Opening
+// goes through the row's own menu trigger so there is exactly one menu and no
+// extra trigger attributes leak onto the row. Long-pressing a link opens the
+// message menu rather than the link menu, matching native chat apps.
+const root = ref<HTMLElement | null>(null)
+function openMenu() {
+  clearHold()
+  root.value?.querySelector<HTMLButtonElement>('button.row-menu-trigger')?.click()
+}
 let holdTimer: ReturnType<typeof setTimeout> | undefined
 let holdStart: { x: number; y: number } | undefined
 let holdDrift = 0
@@ -81,7 +85,7 @@ function pressDown(event: PointerEvent) {
   holdDrift = 0
   holdTimer = setTimeout(() => {
     holdTimer = undefined
-    if (holdIntent(HOLD_MS, holdDrift)) menuOpen.value = true
+    if (holdIntent(HOLD_MS, holdDrift)) openMenu()
     holdStart = undefined
   }, HOLD_MS)
 }
@@ -130,8 +134,7 @@ const options = computed(() => [
 function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 1048576 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1048576).toFixed(1)} MB` }
 </script>
 <template>
-  <ContextMenu v-model:open="menuOpen" :options="options">
-  <article class="message-row" :class="{ compact, own: message.own, swiping }" :data-message-id="message.id" :aria-posinset="position" :aria-setsize="total" :style="swipeX ? { transform: `translateX(${swipeX}px)` } : undefined" @pointerdown="pressDown" @pointermove="pressMove" @pointerup="pressEnd($event)" @pointercancel="pressEnd($event, true)">
+  <article ref="root" class="message-row" :class="{ compact, own: message.own, swiping }" :data-message-id="message.id" :aria-posinset="position" :aria-setsize="total" :style="swipeX ? { transform: `translateX(${swipeX}px)` } : undefined" @pointerdown="pressDown" @pointermove="pressMove" @pointerup="pressEnd($event)" @pointercancel="pressEnd($event, true)" @contextmenu.prevent="openMenu">
     <span v-if="swiping" class="swipe-hint" :class="{ armed: swipeArmed }" :style="{ opacity: swipeReveal, transform: `scale(${0.7 + 0.3 * swipeReveal})` }" aria-hidden="true"><Reply :size="16"/></span>
     <div class="message-avatar"><UserAvatar v-if="!compact" :name="message.name" :size="34" :image="avatar"/><span v-else class="compact-time">{{ time }}</span></div>
     <div class="message-content">
@@ -147,9 +150,8 @@ function sizeLabel(size: number) { return size < 1024 ? `${size} B` : size < 104
       <div v-if="message.shield" class="message-shield" :class="message.shield.level"><Tooltip :text="message.shield.message ?? t('message.shieldFallback')"><span>{{ message.shield.level === 'red' ? t('message.shieldRed') : t('message.shieldAmber') }}</span></Tooltip></div>
       <div v-if="message.status || message.own && message.read" class="message-status"><template v-if="message.status === 'failed'"><span>{{ t('message.sendFailed') }}</span><Button variant="ghost" :aria-label="t('message.retrySending')" @click="retrySend(message)">{{ t('message.retry') }}</Button><Button variant="ghost" :aria-label="t('message.discardUnsent')" @click="discardSend(message)">{{ t('message.discard') }}</Button></template><span v-else-if="message.status === 'sending'">{{ t('message.sending') }}</span><CheckCheck v-else :size="12"/></div>
     </div>
-    <div class="message-actions"><Button variant="ghost" :aria-label="t('message.reactTo')" @click="emit('emoji', message)"><SmilePlus :size="16"/></Button><Button variant="ghost" :aria-label="t('message.replyTo')" @click="emit('reply', message)"><Reply :size="16"/></Button><Dropdown :options="options" align="end"><Button variant="ghost" :aria-label="t('message.messageActions')"><MoreHorizontal :size="17"/></Button></Dropdown></div>
+    <div class="message-actions"><Button variant="ghost" :aria-label="t('message.reactTo')" @click="emit('emoji', message)"><SmilePlus :size="16"/></Button><Button variant="ghost" :aria-label="t('message.replyTo')" @click="emit('reply', message)"><Reply :size="16"/></Button><Dropdown :options="options" align="end"><Button variant="ghost" class="row-menu-trigger" :aria-label="t('message.messageActions')"><MoreHorizontal :size="17"/></Button></Dropdown></div>
   </article>
-  </ContextMenu>
 </template>
 <style scoped>
 .message-row { touch-action: pan-y; position: relative; transition: transform 0.18s ease-out; }
