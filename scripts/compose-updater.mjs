@@ -12,16 +12,19 @@ const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 if (pkg.version !== version) throw new Error(`Tag ${tag} mismatches package.json version ${pkg.version}`)
 const conf = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'))
 if (conf.version !== version) throw new Error(`Tag ${tag} mismatches tauri.conf.json version ${conf.version}`)
-const dir = 'src-tauri/target/release/bundle'
+// The v2 updater consumes the AppImage directly: the CLI signs it in place
+// (bundle/appimage/*.AppImage plus *.AppImage.sig) once
+// bundle.createUpdaterArtifacts is true and the signing key is present.
+const dir = 'src-tauri/target/release/bundle/appimage'
 let entries
 try {
-  entries = readdirSync(join(dir, 'updater'))
+  entries = readdirSync(dir)
 } catch {
-  throw new Error('No updater bundles found. Run the signed release build first (TAURI_SIGNING_PRIVATE_KEY).')
+  throw new Error('No AppImage bundles found. Run the signed release build first (TAURI_SIGNING_PRIVATE_KEY).')
 }
-const asset = entries.find(name => name.endsWith('.AppImage.tar.gz'))
-if (!asset) throw new Error('No signed AppImage updater bundle found. The release build must run with the signing key.')
-const signature = readFileSync(join(dir, 'updater', `${asset}.sig`), 'utf8').trim()
+const asset = entries.find(name => name.endsWith('.AppImage'))
+if (!asset) throw new Error('No AppImage bundle found. The release build must run with the signing key.')
+const signature = readFileSync(join(dir, `${asset}.sig`), 'utf8').trim()
 if (!signature) throw new Error(`Empty signature for ${asset}. The bundle was not signed.`)
 const manifest = {
   version,
@@ -34,5 +37,5 @@ const manifest = {
     },
   },
 }
-writeFileSync(join(dir, 'updater/latest.json'), JSON.stringify(manifest, null, 2) + '\n')
+writeFileSync(join(dir, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(`latest.json for ${tag}: ${asset}`)
