@@ -321,7 +321,7 @@ export const accountName = (id: string) => state.accounts.find(item => item.id =
 // lists the active account's spaces), so other-account rooms drop out while a
 // space is selected.
 export const inboxRooms = computed(() => state.inboxAll && state.accounts.length > 1
-  ? state.rooms.filter(item => item.membership !== 'left').sort((a, b) => b.timestamp - a.timestamp)
+  ? state.rooms.filter(item => !item.space && item.membership !== 'left').sort((a, b) => b.timestamp - a.timestamp)
   : accountRooms.value)
 export const filteredRooms = computed(() => inboxRooms.value.filter(item => {
   if (item.space) return false
