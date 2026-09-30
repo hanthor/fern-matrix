@@ -1094,7 +1094,9 @@ watch(() => ({ rooms: state.rooms.filter(value => value.accountId.startsWith('de
   if (!state.accounts.some(item => item.id === 'demo-home')) return
   try { localStorage.setItem(demoKey, JSON.stringify(value)) } catch { /* Storage quota does not block chatting. */ }
 }, { deep: true })
-void selectRoom(room.value!); state.mobileRoom = false
+// Startup selection: with the login gate there may be no room yet.
+if (room.value) void selectRoom(room.value)
+state.mobileRoom = false
 let restored = false
 export async function initialize() {
   // Session restore waits behind the app lock: secrets are unreadable until
