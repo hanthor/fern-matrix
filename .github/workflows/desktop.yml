@@ -68,7 +68,7 @@ jobs:
       - name: Bundle signed Linux packages
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: cargo tauri build --bundles deb,appimage,updater
+        run: cargo tauri build --bundles deb,appimage
         working-directory: src-tauri
       - name: Compose updater manifest and publish release
         env:
@@ -79,6 +79,5 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" \
             src-tauri/target/release/bundle/deb/*.deb \
             src-tauri/target/release/bundle/appimage/*.AppImage \
-            src-tauri/target/release/bundle/updater/*.AppImage.tar.gz \
-            src-tauri/target/release/bundle/updater/*.AppImage.tar.gz.sig \
-            src-tauri/target/release/bundle/updater/latest.json
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig \
+            src-tauri/target/release/bundle/appimage/latest.json
