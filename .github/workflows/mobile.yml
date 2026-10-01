@@ -46,6 +46,10 @@ jobs:
       - name: Init Android project
         run: cargo tauri android init
         working-directory: src-tauri
+      - name: Sync Fern launcher icons
+        run: |
+          python3 -c "import PIL" 2>/dev/null || pip install -q pillow
+          python3 scripts/sync_android_icons.py
       - name: Build debug APK
         run: cargo tauri android build --debug
         working-directory: src-tauri
@@ -92,6 +96,10 @@ jobs:
       - name: Init Android project
         run: cargo tauri android init
         working-directory: src-tauri
+      - name: Sync Fern launcher icons
+        run: |
+          python3 -c "import PIL" 2>/dev/null || pip install -q pillow
+          python3 scripts/sync_android_icons.py
       - name: Restore upload keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
