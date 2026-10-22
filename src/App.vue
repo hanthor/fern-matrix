@@ -187,7 +187,7 @@ const roomOptions = computed(() => [
   { label: t('nav.leaveRoom'), icon: LogOut, onClick: () => open('leave') },
 ])
 function exploreDemo() { seedDemo(); switchAccount('demo-home'); state.mobileRoom = false }
-function open(value: string) { state.error = ''; setTimeout(() => { modal.value = value; if (value === 'login') loginMode.value = 'signin'; if (value === 'settings') { profileName.value = account.value?.name ?? ''; if (settingsTab.value === 'security') void loadAccountSections() }; if (value === 'explore') void loadDirectory(); if (value === 'roomsettings') void loadRoomSettings() }, 0) }
+function open(value: string, mode: 'signin' | 'register' = 'signin') { state.error = ''; setTimeout(() => { modal.value = value; if (value === 'login') loginMode.value = mode; if (value === 'settings') { profileName.value = account.value?.name ?? ''; if (settingsTab.value === 'security') void loadAccountSections() }; if (value === 'explore') void loadDirectory(); if (value === 'roomsettings') void loadRoomSettings() }, 0) }
 function chooseRoom(value: Room) { if (value.accountId !== state.activeAccountId) switchAccount(value.accountId); reply.value = undefined; edit.value = undefined; endOfHistory.value = false; void selectRoom(value) }
 // Unified inbox: one room list across accounts, newest first. The space rail
 // stays per-account, so enabling it clears any space filter; rows from other
@@ -311,7 +311,6 @@ function oidcRedirectUri() {
   return new URL('oidc-callback.html', location.href).href
 }
 async function startSso() {
-  if (isDemo.value) { notify('Connect an account to use SSO'); return }
   // Starting over abandons any previous pending request; nothing was saved.
   if (oidcFlow) {
     oidcPopup?.close(); oidcPopup = null
@@ -877,7 +876,9 @@ async function sendLocationShare() {
 }
 function dropFile(event: DragEvent) { event.preventDefault(); const file = event.dataTransfer?.files[0]; if (file) void upload(file) }
 watch(() => [state.activeAccountId, state.activeRoomId], (_value, previous) => {
-  if (previous) { const key = `fern.draft.${previous[0]}/${previous[1]}`; if (draft.value) localStorage.setItem(key, draft.value); else localStorage.removeItem(key) }
+  // Account erasure already removed its drafts; a late view watcher must not
+  // recreate them. Ordinary room/account switches still preserve input.
+  if (previous?.[0] && previous[1] && state.accounts.some(item => item.id === previous[0])) { const key = `fern.draft.${previous[0]}/${previous[1]}`; if (draft.value) localStorage.setItem(key, draft.value); else localStorage.removeItem(key) }
   draft.value = localStorage.getItem(`fern.draft.${state.activeAccountId}/${state.activeRoomId}`) ?? ''
   reply.value = undefined; edit.value = undefined; mention.value = undefined; endOfHistory.value = false; renderWindow.value = 150
   cancelVoice(); discardVoice(); cancelLocationShare(); clearFocus()
@@ -932,7 +933,7 @@ onUnmounted(() => { document.removeEventListener('keydown', shortcut); document.
   <div v-if="appLocked" class="lock-screen" role="dialog" aria-modal="true" :aria-label="t('lock.dialog')"><div class="lock-card"><Leaf :size="34"/><h1>{{ t('lock.title') }}</h1><p>{{ t('lock.prompt') }}</p><form @submit.prevent="submitUnlock"><FormControl v-model="pinUnlock" type="password" :label="t('lock.pin')" placeholder="••••" autocomplete="current-password" :aria-label="t('lock.pinEntry')"/><ErrorMessage v-if="state.error" :message="state.error"/><Button variant="solid" theme="green" type="submit" :loading="lockBusy">{{ t('lock.unlock') }}</Button></form></div></div>
   <div class="app-shell" :class="{ 'mobile-conversation': state.mobileRoom, 'with-details': state.details }">
     <template v-if="!state.accounts.length">
-      <div class="welcome-gate"><span class="welcome-logo"><Leaf :size="44"/></span><span class="eyebrow">FERN · MATRIX</span><h1>{{ t('gate.title') }}</h1><p>{{ t('gate.subtitle') }}</p><div class="gate-actions"><Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button><Button variant="outline" @click="loginMode = 'register'; open('login')">{{ t('login.createAccount') }}</Button><Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button></div></div>
+      <div class="welcome-gate"><span class="welcome-logo"><Leaf :size="44"/></span><span class="eyebrow">FERN · MATRIX</span><h1>{{ t('gate.title') }}</h1><p>{{ t('gate.subtitle') }}</p><div class="gate-actions"><Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button><Button variant="outline" @click="open('login', 'register')">{{ t('login.createAccount') }}</Button><Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button></div></div>
     </template>
     <template v-else>
     <nav class="account-rail" :aria-label="t('nav.accountsSpaces')">

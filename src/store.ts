@@ -31,11 +31,9 @@ const demoKey = 'fern.demo.v1'
 function readDemo(): { rooms?: Room[]; messages?: Record<string, Message[]> } {
   try { return JSON.parse(localStorage.getItem(demoKey) ?? '{}') } catch { return {} }
 }
-// Demo availability: the local tour ships only on the dedicated demo
-// instance (GitHub Pages sets VITE_FERN_DEMO=1 at build time) or an explicit
-// ?demo=1 override, plus always under unit tests exercising the fixtures.
-// Everywhere else the app starts empty and prompts for login/account
-// creation; ?demo=0 forces the gate even on the demo instance.
+// The public app starts at sign-in. Tours are explicit: Explore the demo,
+// ?demo=1, or a dedicated VITE_FERN_DEMO=1 development/test build.
+// ?demo=0 forces the signed-out gate even on a tour-enabled build.
 export function demoEnabled(): boolean {
   // Explicit URL override wins over the build flag.
   if (typeof location !== 'undefined') {
@@ -1022,18 +1020,19 @@ export async function signIn(server: string, username: string, password: string)
   if (id) { switchAccount(id); retireDemo(); notify('Account connected') }
   return id
 }
-// A real account replaces the demo: the demo is onboarding, not a second
-// account alongside the user's own. It returns only when the last real
-// account leaves the device (see seedDemo).
+// A real account replaces every tour fixture, not just the personal demo.
+// Demo data is entered explicitly, never as a side effect of account removal.
 export function retireDemo() {
-  if (!state.accounts.some(item => item.id === 'demo-home')) return
-  if (!state.accounts.some(item => item.id !== 'demo-home')) return
-  if (state.activeAccountId === 'demo-home') return
-  clearAccountState('demo-home')
+  if (!state.accounts.some(item => item.connection !== 'demo')) return
+  if (account.value?.connection === 'demo') return
+  for (const item of [...state.accounts]) {
+    if (item.connection === 'demo') clearAccountState(item.id)
+  }
 }
 export function seedDemo() {
-  if (state.accounts.some(item => item.id === 'demo-home')) return
-  state.accounts.push(...structuredClone(demoAccounts))
+  for (const item of demoAccounts) {
+    if (!state.accounts.some(account => account.id === item.id)) state.accounts.push(structuredClone(item))
+  }
   const saved = readDemo()
   for (const room of saved.rooms ?? demoRooms) {
     if (!state.rooms.some(item => item.id === room.id && item.accountId === room.accountId)) {
@@ -1044,6 +1043,15 @@ export function seedDemo() {
     if (!state.messages[key]) state.messages[key] = structuredClone(messages)
   }
 }
+// All real-account exit paths share the same destination: another real account
+// or the signed-out gate. Never introduce demo identities into a live session.
+function selectAfterAccountExit() {
+  for (const item of [...state.accounts]) {
+    if (item.connection === 'demo') clearAccountState(item.id)
+  }
+  const next = state.accounts.find(item => item.id === state.activeAccountId) ?? state.accounts[0]
+  switchAccount(next?.id ?? '')
+}
 export async function signOut() {
   const id = state.activeAccountId
   if (isDemo.value) { notify('This is a demo account. Connect a Matrix account to sign in.'); return }
@@ -1052,11 +1060,7 @@ export async function signOut() {
     // the local account: credentials, drafts, crypto store and cached media.
     const result = await engine.logout(id)
     clearAccountState(id)
-    // Leaving the last account returns to the login gate unless this build
-    // serves the demo tour.
-    if (demoEnabled()) { seedDemo(); switchAccount('demo-home') }
-    else if (state.accounts[0]) switchAccount(state.accounts[0].id)
-    else { state.activeAccountId = ''; state.activeRoomId = '' }
+    selectAfterAccountExit()
     notify(result?.serverRevoked === false
       ? 'Signed out on this device. The server session may still be active.'
       : 'Signed out of this account')
@@ -1074,11 +1078,7 @@ export async function removeAccount(id: string) {
     // sessions that are already invalid or unreachable.
     await engine.removeAccount(id)
     clearAccountState(id)
-    if (state.activeAccountId === id) {
-      if (demoEnabled()) { seedDemo(); switchAccount('demo-home') }
-      else if (state.accounts[0]) switchAccount(state.accounts[0].id)
-      else { state.activeAccountId = ''; state.activeRoomId = '' }
-    }
+    selectAfterAccountExit()
     notify('Removed this account from this device')
   })
 }
@@ -1104,8 +1104,18 @@ export async function initialize() {
   if (restored || appLocked.value) return
   restored = true
   await action(() => engine.restoreAll())
-  // A reload with saved sessions must not resurrect the demo alongside them.
-  retireDemo()
+  const restoreError = state.error
+  // Restored sessions arrive through SDK callbacks, which do not choose a
+  // view. Prefer an existing real selection, otherwise select the first
+  // restored account (including an expired account needing sign-in recovery).
+  const realAccounts = state.accounts.filter(item => item.connection !== 'demo')
+  const selected = realAccounts.find(item => item.id === state.activeAccountId) ?? realAccounts[0]
+  if (selected) {
+    switchAccount(selected.id)
+    retireDemo()
+  }
+  // switchAccount clears view errors; preserve restoration failures explicitly.
+  state.error = restoreError || selected?.error || state.error
 }
 // ---- Device app lock (#38) ----
 // The PIN gates the whole app and (outside the OS keychain) encrypts stored
@@ -1269,7 +1279,7 @@ export async function deactivateAccount(password: string, erase: boolean) {
   await action(() => engine.deactivate(id, password, erase))
   if (state.error) return false
   clearAccountState(id)
-  if (state.activeAccountId === id) { seedDemo(); switchAccount('demo-home') }
+  selectAfterAccountExit()
   notify('Account deactivated')
   return true
 }
