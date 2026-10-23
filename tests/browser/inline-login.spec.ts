@@ -2,9 +2,9 @@ import { test, expect, type Page } from '@playwright/test'
 
 async function fillLogin(page: Page) {
   const form = page.locator('.gate-login')
-  await form.getByLabel('Homeserver', { exact: true }).fill('example.org')
-  await form.getByLabel('Username', { exact: true }).fill('synthetic-user')
-  await form.getByLabel('Password', { exact: true }).fill('synthetic-password')
+  await form.getByLabel(/^Homeserver\s*\*?\s*\(required\)$/).fill('example.org')
+  await form.getByLabel(/^Username\s*\*?\s*\(required\)$/).fill('synthetic-user')
+  await form.getByLabel(/^Password\s*\*?\s*\(required\)$/).fill('synthetic-password')
   return form
 }
 
@@ -21,7 +21,7 @@ test('inline login uses native required validation without contacting the SDK', 
   const form = page.locator('.gate-login')
   await form.getByRole('button', { name: 'Connect account', exact: true }).click()
   expect(await form.evaluate(el => (el as HTMLFormElement).checkValidity())).toBe(false)
-  await expect(form.getByLabel('Username', { exact: true })).toBeFocused()
+  await expect(form.getByLabel(/^Username\s*\*?\s*\(required\)$/)).toBeFocused()
   expect(await page.evaluate(() => (window as unknown as { loginCalls: number }).loginCalls)).toBe(0)
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
@@ -44,7 +44,7 @@ for (const rejected of [true, false]) {
     await form.getByRole('button', { name: 'Connect account', exact: true }).click()
     if (rejected) {
       await expect(page.getByText('New to Matrix?', { exact: false })).toBeVisible()
-      await form.getByLabel('Username', { exact: true }).fill('another-synthetic-user')
+      await form.getByLabel(/^Username\s*\*?\s*\(required\)$/).fill('another-synthetic-user')
       await expect(page.getByText('New to Matrix?', { exact: false })).toHaveCount(0)
     } else {
       await expect(page.getByText('Sign-in could not finish. Check your connection and homeserver, then try again.')).toBeVisible()

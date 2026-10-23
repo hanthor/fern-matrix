@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createI18n } from 'vue-i18n'
+import { baseCompile } from '@intlify/message-compiler'
 import { resolveLocale } from '../src/i18n'
 import en from '../src/locales/en.json'
 import de from '../src/locales/de.json'
@@ -44,4 +45,28 @@ describe('pilot catalogs', () => {
     // No catalog entry anywhere: vue-i18n returns the key, never blank copy.
     expect(i18n.global.t('rooms.notMigratedYet')).toBe('rooms.notMigratedYet')
   })
+})
+
+
+describe('catalog message syntax', () => {
+  for (const [locale, catalog] of Object.entries({ en, de })) {
+    it(`compiles every ${locale} message without invalid linked syntax`, () => {
+      const visit = (value: unknown, path = '') => {
+        if (typeof value === 'string') {
+          const errors: string[] = []
+          baseCompile(value, { onError: error => errors.push(error.message) })
+          expect(errors, `${locale}.${path}`).toEqual([])
+        } else if (value && typeof value === 'object') {
+          for (const [key, nested] of Object.entries(value)) visit(nested, `${path}.${key}`)
+        }
+      }
+      visit(catalog)
+    })
+    it(`renders literal Matrix ID markers in ${locale} auth instructions`, () => {
+      const { t } = createI18n({ legacy: false, locale, messages: { en, de } }).global
+      expect(t('login.localpartNote')).toContain('@')
+      expect(t('login.invalidMxid')).toContain(locale === 'en' ? '@you:example.org' : '@du:example.org')
+      expect(t('login.registrationLocalpart')).toContain('@')
+    })
+  }
 })

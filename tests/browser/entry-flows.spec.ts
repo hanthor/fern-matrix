@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test'
 
 test('Register opens registration, and returning to inline sign-in resets it deliberately', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
   await page.goto('/?demo=0')
   await page.evaluate(async () => {
     // @ts-expect-error Vite resolves this browser-only source import.
@@ -8,6 +10,16 @@ test('Register opens registration, and returning to inline sign-in resets it del
     engine.loginMethods = async () => ({ password: true, sso: false, oidc: false })
   })
   await page.getByRole('button', { name: 'Register', exact: true }).click()
+  // Keep failures actionable without collecting traces or credential-bearing DOM.
+  await expect.poll(async () => ({
+    errors,
+    error: await page.evaluate(async () => {
+      // @ts-expect-error Vite resolves this browser-only source import.
+      const { state } = await import('/src/store.ts')
+      return state.error
+    }),
+    registrationVisible: await page.getByRole('button', { name: 'Create account', exact: true }).isVisible(),
+  })).toEqual({ errors: [], error: '', registrationVisible: true })
   const dialog = page.getByRole('dialog', { name: 'Add a Matrix account' })
   await expect(dialog.getByRole('button', { name: 'Create account', exact: true })).toBeVisible()
   await expect(dialog.getByText('Fern checks availability first', { exact: false })).toBeVisible()
