@@ -189,7 +189,7 @@ test('live password login, simultaneous account isolation, restoration and logou
 test('login discovery reports password-only flows and SSO starts fail actionably', async ({ page }) => {
   await boot(page)
   const methods = await page.evaluate(base => window.matrixTest.engine.loginMethods(base), fixture.base)
-  expect(methods).toEqual({ password: true, sso: false, oidc: false })
+  expect(methods).toEqual({ password: true, sso: false, oidc: false, homeserverUrl: new URL(fixture.base).href })
   // Modern OIDC refuses to start without an authentication issuer, while
   // legacy SSO only builds its redirect URL up front. Either way a bogus
   // callback fails actionably and nothing is persisted.
