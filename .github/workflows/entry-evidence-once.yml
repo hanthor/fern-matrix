@@ -29,12 +29,17 @@ jobs:
             https://api.github.com/repos/hanthor/fern-matrix/actions/artifacts/12475828055/zip
           unset GH_TOKEN
           python3 - <<'PY'
-          import base64, hashlib, io, json, os, re, struct, zipfile
+          import base64, hashlib, io, json, os, struct, zipfile
           from pathlib import Path
           archive = Path(os.environ["ARCHIVE"]).read_bytes()
           if len(archive) != 152129 or hashlib.sha256(archive).hexdigest() != "6fd6c3974bd735ba965c95a93761c93e108144aa1c72909cb1d74a12ef7d22d7":
               raise SystemExit("Pinned archive size or SHA256 mismatch")
           expected = {(360, 800), (320, 568), (800, 360)}
+          expected_members = {
+              "entry-art-entry-stays-centered-and-reachable-at-320-×-568/entry-dark.png": (320, 568),
+              "entry-art-entry-stays-centered-and-reachable-at-360-×-800/entry-dark.png": (360, 800),
+              "entry-art-entry-stays-centered-and-reachable-at-800-×-360/entry-dark.png": (800, 360),
+          }
           seen = set()
           with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
               members = bundle.infolist()
@@ -44,7 +49,7 @@ jobs:
                   raise SystemExit("Artifact member name exceeds bound")
               print("FERN_ARTIFACT_MEMBERS " + json.dumps([entry.filename for entry in members], ensure_ascii=True))
               for entry in members:
-                  if not re.fullmatch(r"entry-art-entry-stays-[a-zA-Z0-9_-]+/entry-dark\.png", entry.filename):
+                  if entry.filename not in expected_members:
                       raise SystemExit("Unexpected artifact member")
                   if entry.file_size > 1024 * 1024:
                       raise SystemExit("PNG member exceeds byte bound")
@@ -53,7 +58,7 @@ jobs:
                   if len(png) > 1024 * 1024 or len(png) < 33 or png[:8] != b"\x89PNG\r\n\x1a\n" or png[8:16] != b"\x00\x00\x00\x0dIHDR":
                       raise SystemExit("Invalid PNG header")
                   width, height = struct.unpack("!II", png[16:24])
-                  if (width, height) not in expected or (width, height) in seen:
+                  if (width, height) != expected_members[entry.filename] or (width, height) in seen:
                       raise SystemExit("Unexpected or duplicate screenshot dimensions")
                   seen.add((width, height))
                   key = f"{width}x{height}"
