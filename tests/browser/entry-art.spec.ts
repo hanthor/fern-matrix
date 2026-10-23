@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 
-for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }, { width: 800, height: 360 }]) {
+for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }, { width: 800, height: 360 }, { width: 1440, height: 900 }]) {
   test(`entry stays centered and reachable at ${viewport.width} × ${viewport.height}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' })
@@ -9,6 +9,18 @@ for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }
     await expect(gate.getByRole('heading')).toBeVisible()
     const content = await page.locator('.gate-content').boundingBox()
     expect(content).not.toBeNull()
+    const fern = page.locator('.fern-fractal')
+    expect(await fern.boundingBox()).toEqual({ x: 0, y: 0, width: viewport.width, height: viewport.height })
+    await expect(fern).toHaveAttribute('aria-hidden', 'true')
+    expect(await fern.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none')
+    // Check the actual projected paths, not just an empty full-screen SVG box.
+    const artwork = await fern.locator('svg').evaluate(svg => {
+      const bounds = (svg as SVGSVGElement).getBBox()
+      const matrix = (svg as SVGSVGElement).getScreenCTM()!
+      return { width: bounds.width * matrix.a, height: bounds.height * matrix.d }
+    })
+    expect(artwork.width).toBeGreaterThan(viewport.width * .9)
+    expect(artwork.height).toBeGreaterThan(viewport.height * .9)
     expect(Math.abs(content!.x + content!.width / 2 - viewport.width / 2)).toBeLessThan(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width)
     const buttons = gate.getByRole('button')
@@ -20,6 +32,8 @@ for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }
       expect(box!.x).toBeGreaterThanOrEqual(0)
       expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width)
     }
+    // Scrolling the form must not scroll the viewport backdrop away.
+    expect(await fern.boundingBox()).toEqual({ x: 0, y: 0, width: viewport.width, height: viewport.height })
     await gate.evaluate(el => { el.scrollTop = 0 })
     // Signed-out artwork only: never collect account/session screenshots.
     await page.screenshot({ path: testInfo.outputPath('entry-dark.png') })
@@ -137,3 +151,39 @@ test('unmount releases the fern visibility and motion listeners', async ({ page 
   })
   expect(counts).toEqual({ added: 1, released: true, motionAdded: 1, motionRemoved: 1 })
 })
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test(`background keeps readable text and keyboard focus in ${colorScheme}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' })
+    await page.goto('/?demo=0')
+    const gate = page.locator('.welcome-gate')
+    await expect(gate.getByRole('heading')).toBeVisible()
+    await gate.getByLabel('Homeserver').focus()
+    await expect(gate.getByLabel('Homeserver')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(gate.getByLabel('Username')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(gate.getByLabel('Password', { exact: true })).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(gate.getByRole('button', { name: 'Connect account', exact: true })).toBeFocused()
+    // Form text has a 96% page-color backing; verify conservative contrast
+    // even if the remaining 4% were pure white/black instead of the subtle art.
+    const colors = await gate.evaluate(el => {
+      const styles = getComputedStyle(el)
+      return { page: styles.getPropertyValue('--page').trim(), text: styles.getPropertyValue('--text').trim(), subtle: styles.getPropertyValue('--subtle').trim() }
+    })
+    const rgb = (hex: string) => {
+      const digits = hex.slice(1)
+      const full = digits.length === 3 ? [...digits].map(d => d + d).join('') : digits
+      return [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16) / 255)
+    }
+    const luminance = (channels: number[]) => channels.map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i]!, 0)
+    const backing = luminance(rgb(colors.page).map(v => .96 * v + .04 * (colorScheme === 'dark' ? 1 : 0)))
+    for (const color of [colors.text, colors.subtle]) {
+      const ink = luminance(rgb(color))
+      expect((Math.max(ink, backing) + .05) / (Math.min(ink, backing) + .05)).toBeGreaterThanOrEqual(4.5)
+    }
+    await page.screenshot({ path: testInfo.outputPath(`entry-${colorScheme}.png`) })
+  })
+}

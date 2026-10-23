@@ -24,7 +24,7 @@ onUnmounted(() => {
 
 <template>
   <div class="fern-fractal" :class="{ 'is-paused': hidden || paused, 'is-still': reduced }" aria-hidden="true">
-    <svg viewBox="0 0 200 240" focusable="false">
+    <svg viewBox="48 10 104 220" preserveAspectRatio="xMidYMid slice" focusable="false">
       <path v-for="(path, index) in paths" :key="index" :d="path" :style="{ '--frond': index }"/>
     </svg>
   </div>
@@ -32,23 +32,21 @@ onUnmounted(() => {
 
 <style scoped>
 .fern-fractal {
-  width: clamp(160px, 28vh, 240px);
-  width: clamp(160px, 28dvh, 240px);
-  aspect-ratio: 5 / 6;
-  flex: none;
-  position: relative;
+  /* A viewport layer, not part of the form's scrollable layout. */
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
   color: var(--fern);
   pointer-events: none;
-  margin-bottom: 8px;
+  opacity: .42;
 }
 .fern-fractal::before {
   content: '';
   position: absolute;
-  inset: 12% -20%;
-  border-radius: 50%;
-  background: radial-gradient(ellipse, var(--fern-soft), transparent 70%);
+  inset: 0;
+  background: radial-gradient(ellipse at 65% 35%, var(--fern-soft), transparent 75%);
 }
-svg { display: block; width: 100%; height: 100%; position: relative; overflow: visible; }
+svg { display: block; width: 100%; height: 100%; position: relative; }
 path {
   fill: none;
   stroke: currentColor;
@@ -66,5 +64,5 @@ path {
   to { opacity: .82; transform: translateY(0) scale(1); }
 }
 @media (prefers-reduced-motion: reduce) { path { animation: none; } }
-@media (max-height: 520px) { .fern-fractal { width: 100px; } }
+
 </style>

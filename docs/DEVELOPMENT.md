@@ -105,3 +105,11 @@ Full Matrix IDs are authoritative for the logical sign-in server: `@you:example.
 Register is an explicit separate transition: a full ID retains its logical server and becomes a local username in the confirmation form; its password is cleared. Registration does not reinterpret a new localpart as a sign-in identity. The registration availability check and POST use the SDK-discovered homeserver endpoint, while subsequent sign-in retains the selected logical server. Provider registration remains possible without entering a localpart. Destination tests use synthetic SDK/client boundaries, including delegation; they are not live federation/provider qualification.
 
 SDK discovery reference: [runtime-pinned homeserver configuration](https://github.com/matrix-org/matrix-rust-sdk/blob/73449f4f57e4185c95ee69cf9f3e41d9a0e0857e/crates/matrix-sdk/src/client/builder/homeserver_config.rs) distinguishes strict `ServerName` from generic same-authority discovery/direct fallback. Fern passes the extracted, locally validated full authority unchanged, including port or bracketed IPv6; the earlier manually selected server is never an alternative candidate.
+
+The entry fern is a fixed, pointer-transparent SVG backdrop with a tightly cropped
+viewBox and `slice` scaling, independent of the scrolling login surface. Its 24
+seeded path batches keep the existing finite (<3.02s) unfurl and stop behind
+modals/hidden pages; reduced motion renders the static fern. The form uses a 96%
+page-color backing (opaque fallback) rather than a costly animated blur. Entry
+artwork tests check actual projected path bounds, scroll reachability, keyboard
+focus, conservative light/dark text contrast, and signed-out-only screenshots.
