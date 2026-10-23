@@ -27,7 +27,7 @@ const mode = computed(() => props.state.target?.mode ?? 'signout')
       <p><strong>{{ state.target.name }}</strong><br/>{{ state.target.userId }}<br/><small>{{ t('sessionExit.localSession', { id: state.target.id }) }}</small></p>
       <p>{{ t(`sessionExit.${mode}Description`) }}</p>
       <p>{{ t('sessionExit.historyWarning') }}</p>
-      <Alert v-if="native" theme="yellow" :title="t('sessionExit.nativeWarning')"/>
+      <Alert v-if="native" theme="red" :title="t('sessionExit.nativeWarning')"/>
       <p v-if="state.checking" role="status"><LoadingIndicator/> {{ t('sessionExit.checking') }}</p>
       <template v-else>
         <p role="status">{{ t(`sessionExit.recovery.${state.status.recovery}`) }}</p>
