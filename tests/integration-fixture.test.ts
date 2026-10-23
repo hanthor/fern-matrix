@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse, type DisposableUser } from './integration/fixture-contract'
+import { verificationUser, backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse, type DisposableUser } from './integration/fixture-contract'
 
 const shared: DisposableUser = { username: 'shared', password: 'test-password', userId: '@shared:test', token: 'test-token' }
 const isolated: DisposableUser = { username: 'backup-migration', password: 'isolated-password', userId: '@backup-migration:test', token: 'isolated-token' }
@@ -65,5 +65,24 @@ describe('integration HTTP JSON contract', () => {
   it('tolerates malformed error JSON without exposing parser text', async () => {
     await expect(matrixResponseBody(500, async () => { throw new SyntaxError('secret-response-text') }))
       .resolves.toBeNull()
+  })
+})
+
+describe('verification fixture isolation', () => {
+  it('selects the dedicated verification identity', () => {
+    expect(verificationUser({ users: [shared], scenarioUsers: { verificationAccept: isolated } }, 'verificationAccept')).toBe(isolated)
+  })
+  it('rejects a missing or incomplete scenario without leaking credentials', () => {
+    expect(() => verificationUser({ users: [shared] }, 'verificationAccept')).toThrow('no complete verification account')
+    expect(() => verificationUser({ users: [], scenarioUsers: { verificationCancel: { ...isolated, token: '' } } }, 'verificationCancel'))
+      .toThrow('no complete verification account')
+  })
+  it('rejects shared users and aliases of other scenario identities', () => {
+    expect(() => verificationUser({ users: [isolated], scenarioUsers: { verificationAccept: isolated } }, 'verificationAccept'))
+      .toThrow('must not reuse')
+    for (const other of ['backupMigration', 'verificationAccept', 'verificationCancel'] as const) {
+      expect(() => verificationUser({ users: [], scenarioUsers: { [other]: isolated, verificationReject: { ...isolated } } }, 'verificationReject'))
+        .toThrow('must not reuse')
+    }
   })
 })

@@ -86,7 +86,8 @@ def main():
             users = []
             scenario_users = {}
             for username, admin in [("alice", False), ("bob", False), ("reference", False), ("admin", True),
-                                    ("backup-migration", False)]:
+                                    ("backup-migration", False), ("verification-accept", False),
+                                    ("verification-cancel", False), ("verification-reject", False)]:
                 password = secrets.token_urlsafe(32)
                 nonce = api(base, "/_synapse/admin/v1/register")["nonce"]
                 mac = hmac.new(shared_secret.encode(), digestmod=hashlib.sha1)
@@ -98,8 +99,12 @@ def main():
                 })
                 user = {"username": username, "password": password, "userId": registered["user_id"],
                         "token": registered["access_token"]}
-                if username == "backup-migration":
-                    scenario_users["backupMigration"] = user
+                scenario_names = {"backup-migration": "backupMigration",
+                                  "verification-accept": "verificationAccept",
+                                  "verification-cancel": "verificationCancel",
+                                  "verification-reject": "verificationReject"}
+                if username in scenario_names:
+                    scenario_users[scenario_names[username]] = user
                 else:
                     users.append(user)
             # Credentials only in a mode-0600 temporary file; never in stdout, args or CI logs.

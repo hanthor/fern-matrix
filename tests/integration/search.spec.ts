@@ -69,6 +69,9 @@ test('focused jump, pins with permissions, and deleted-event previews', async ({
     await watch(pa, a, roomId); await watch(pb, b, roomId)
     for (const body of ['Searchable sunshine one', 'Searchable sunshine two', 'Searchable sunshine three']) {
       await pa.evaluate(({ a, roomId, body }) => window.matrixTest.engine.send(a, roomId, body), { a, roomId, body })
+      // send() enqueues a local echo; focused context is fetched from the
+      // server. Require every surrounding event to be acknowledged first.
+      await findMessage(pa, a, roomId, body)
     }
     const middle = await findMessage(pa, a, roomId, 'Searchable sunshine two')
 

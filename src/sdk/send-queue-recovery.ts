@@ -53,11 +53,11 @@ export class SendQueueRecovery {
     current: () => boolean,
   ): Promise<QueueReachability | undefined> {
     if (this.running) return this.running
-    if (this.stopped || !current()) return Promise.resolve()
+    if (this.stopped || !current()) return Promise.resolve(undefined)
     const candidates = [...this.failures].filter(([, room]) =>
       room.size > 0 && [...room.values()].every(failure => failure.recoverable),
     ).map(([roomId, room]) => [roomId, new Map(room)] as const)
-    if (candidates.length === 0) return Promise.resolve()
+    if (candidates.length === 0) return Promise.resolve(undefined)
     const attempt = async (): Promise<QueueReachability | undefined> => {
       let result: QueueReachability
       try { result = await probe() } catch { return 'unavailable' }
