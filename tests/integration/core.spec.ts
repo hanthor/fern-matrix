@@ -12,6 +12,8 @@ interface Fixture { base: string; version: string; users: FixtureUser[]; scenari
 declare global {
   interface Window {
     directoryTestIds: string[]
+    offlineQueueErrors: { transactionId: string; recoverable: boolean }[]
+    offlineQueueSent: { transactionId: string; eventId: string }[]
     matrixTest: { engine: MatrixEngine; accounts: Record<string, Account>; rooms: Record<string, Room[]>;
       messages: Record<string, Message[]>; typing: Record<string, string[]>; errors: string[]; stops: (() => void)[];
       verification: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[] }[] }
@@ -283,7 +285,46 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
     const loginVia = async (page: Page, user: FixtureUser) => page.evaluate(({ base, username, password }) =>
       window.matrixTest.engine.login(base, username, password),
     { base: viaProxy, username: user.username, password: user.password })
+    // Both pre-login discovery and the login response advertise Synapse's
+    // direct public_baseurl. Keep both on this disposable proxy, otherwise
+    // the SDK correctly follows discovery and silently bypasses the blackout.
+    const loginPath = /^\/_matrix\/client\/(?:v3|r0)\/login$/
+    const discoveryPath = '/.well-known/matrix/client'
+    const proxyDiscovery = (url: URL) => url.origin === viaProxy
+      && (url.pathname === discoveryPath || loginPath.test(url.pathname))
+    const rewritten = { discovery: 0, login: 0 }
+    await pa.route(proxyDiscovery, async route => {
+      const path = new URL(route.request().url()).pathname
+      const discovery = path === discoveryPath && route.request().method() === 'GET'
+      const login = loginPath.test(path) && route.request().method() === 'POST'
+      if (!discovery && !login) return route.continue()
+      const response = await route.fetch()
+      if (!response.ok()) return route.fulfill({ response })
+      const body = await response.json()
+      if (discovery) {
+        body['m.homeserver'] = { ...body['m.homeserver'], base_url: viaProxy }
+        rewritten.discovery++
+      } else {
+        body.well_known = {
+          ...body.well_known,
+          'm.homeserver': { ...body.well_known?.['m.homeserver'], base_url: viaProxy },
+        }
+        rewritten.login++
+      }
+      const headers = response.headers()
+      // The response body changed; let Playwright compute its new length.
+      delete headers['content-length']
+      delete headers['content-encoding']
+      await route.fulfill({ response, headers, json: body })
+    })
     const a = await loginVia(pa, alice)
+    await pa.unroute(proxyDiscovery)
+    expect(rewritten.discovery).toBeGreaterThan(0)
+    expect(rewritten.login).toBeGreaterThan(0)
+    expect(await pa.evaluate(a => {
+      const record = JSON.parse(localStorage.getItem('fern.sessions.v1') ?? '{}')[a]
+      return record?.homeserverUrl ? new URL(record.homeserverUrl).origin : null
+    }, a)).toBe(viaProxy)
     const b = await login(pb, bob)
     const { room_id: roomId } = await matrix(request, reference, 'POST', '/createRoom', {
       name: 'Offline queue fixture', visibility: 'public', preset: 'public_chat',
@@ -295,39 +336,95 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
       await p.evaluate(({ id, roomId }) => window.matrixTest.engine.join(id, roomId), { id, roomId })
       await watch(p, id, roomId)
     }
+    await pa.evaluate(async ({ a, roomId }) => {
+      window.offlineQueueErrors = []
+      window.offlineQueueSent = []
+      const handle = await window.matrixTest.engine.getClient(a).subscribeToSendQueueUpdates({
+        onUpdate: (id, update) => {
+          if (id === roomId && update.tag === 'SendError') {
+            window.offlineQueueErrors.push({ transactionId: update.inner.transactionId, recoverable: update.inner.isRecoverable })
+          }
+          if (id === roomId && update.tag === 'SentEvent') {
+            window.offlineQueueSent.push({ transactionId: update.inner.transactionId, eventId: update.inner.eventId })
+          }
+        },
+      })
+      window.matrixTest.stops.push(() => handle.cancel())
+    }, { a, roomId })
+    let keptId = ''
     await blackout()
     // NOTE: the sync-service state stays 'online' through the blackout (the
     // SDK retries internally without flipping its service state), so downtime
     // status is asserted only on the send queue below. See issue #8.
     try {
+      // Prove the endpoint used by the persisted SDK session is unreachable,
+      // not merely that a separate proxy listener was stopped.
+      expect(await pa.evaluate(async base => {
+        try {
+          await fetch(base + '/_matrix/client/versions', { cache: 'no-store', signal: AbortSignal.timeout(5000) })
+          return false
+        } catch { return true }
+      }, viaProxy)).toBe(true)
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Queued while offline'), { a, roomId })
-      // The local echo stays pending while the network is down.
-      await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
-        ?.some(message => message.body === 'Queued while offline' && message.status === 'sending') ?? false,
-      { a, roomId })).toBe(true)
+      // The pinned SDK disables the room queue after a network failure.
+      // Exercise that real failure/recovery path, rather than requiring its
+      // transient NotSentYet state to survive until Playwright polls.
+      await expect.poll(() => pa.evaluate(({ a, roomId }) => {
+        const echoes = (window.matrixTest.messages[a + '/' + roomId] ?? [])
+          .filter(message => message.body === 'Queued while offline')
+        const echo = echoes[0]
+        return {
+          count: echoes.length,
+          failed: echo?.status === 'failed',
+          recoverable: !!echo && window.offlineQueueErrors.some(error => error.transactionId === echo.id && error.recoverable),
+          queueEnabled: window.matrixTest.engine.getClient(a).getRoom(roomId)?.isSendQueueEnabled(),
+        }
+      }, { a, roomId })).toEqual({ count: 1, failed: true, recoverable: true, queueEnabled: false })
+      keptId = await pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]!
+        .find(message => message.body === 'Queued while offline')!.id, { a, roomId })
       // A queued echo can be discarded before it ever leaves the device.
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Discarded while offline'), { a, roomId })
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
         ?.some(message => message.body === 'Discarded while offline') ?? false, { a, roomId })).toBe(true)
       const discarded = await pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]!
         .find(message => message.body === 'Discarded while offline')!, { a, roomId })
-      await pa.evaluate(({ a, roomId, messageId }) => window.matrixTest.engine.discardSend(a, roomId, messageId),
-        { a, roomId, messageId: discarded.id })
+      expect(await pa.evaluate(({ a, roomId, messageId }) => window.matrixTest.engine.discardSend(a, roomId, messageId),
+        { a, roomId, messageId: discarded.id })).toBe(true)
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
-        ?.some(message => message.body === 'Discarded while offline' && message.status === 'sending') ?? false,
+        ?.some(message => message.body === 'Discarded while offline') ?? false,
       { a, roomId })).toBe(false)
+      // The kept local echo and its original SDK transaction survive discard.
+      expect(await pa.evaluate(({ a, roomId, keptId }) => window.matrixTest.messages[a + '/' + roomId]
+        ?.some(message => message.id === keptId && message.body === 'Queued while offline' && message.status === 'failed') ?? false,
+      { a, roomId, keptId })).toBe(true)
+      // Check the actual server through the independent reference connection,
+      // not just a receiver that may still be catching up with sync.
+      const offlineHistory = await matrix(request, reference, 'GET', `/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`)
+      expect(offlineHistory.chunk.some((event: { content?: { body?: string } }) =>
+        ['Queued while offline', 'Discarded while offline'].includes(event.content?.body ?? ''))).toBe(false)
     } finally {
       await restore()
     }
     // Reconnect flushes the queue: the kept message arrives, the discarded
     // one never does, and the flush delivers exactly once.
-    await findMessage(pb, b, roomId, 'Queued while offline')
+    const delivered = await findMessage(pb, b, roomId, 'Queued while offline')
+    await expect.poll(() => pa.evaluate(({ keptId, eventId }) => window.offlineQueueSent
+      .filter(event => event.transactionId === keptId && event.eventId === eventId).length,
+    { keptId, eventId: delivered.id })).toBe(1)
+    await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
+      ?.filter(message => message.body === 'Queued while offline' && message.status === undefined).length ?? 0,
+    { a, roomId })).toBe(1)
+    // Repeated connectivity probes must not recreate an already sent event.
+    await pa.evaluate(async a => { await window.matrixTest.engine.retryConnection(a); await window.matrixTest.engine.retryConnection(a) }, a)
     await pb.waitForTimeout(5000)
     const deliveries = await pb.evaluate(({ b, roomId }) => window.matrixTest.messages[b + '/' + roomId]
       ?.filter(message => message.body === 'Queued while offline').length ?? 0, { b, roomId })
     expect(deliveries).toBe(1)
     expect(await pb.evaluate(({ b, roomId }) => window.matrixTest.messages[b + '/' + roomId]
       ?.some(message => message.body === 'Discarded while offline') ?? false, { b, roomId })).toBe(false)
+    const recoveredHistory = await matrix(request, reference, 'GET', `/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`)
+    expect(recoveredHistory.chunk.filter((event: { content?: { body?: string } }) => event.content?.body === 'Queued while offline').length).toBe(1)
+    expect(recoveredHistory.chunk.some((event: { content?: { body?: string } }) => event.content?.body === 'Discarded while offline')).toBe(false)
   } finally {
     for (const p of [pa, pb]) {
       await p.evaluate(async () => { window.matrixTest?.stops.forEach(stop => stop()); await window.matrixTest?.engine.dispose() }).catch(() => {})

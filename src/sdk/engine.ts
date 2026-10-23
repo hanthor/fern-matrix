@@ -5,6 +5,7 @@ import type { ExitRecoveryStatus } from '../session-exit'
 import { isSessionRemoving as isRemovingSession, markSessionRemoving, routingStorageLock, deleteSessionDrafts } from '../session-storage'
 import type { RoomNotificationMode } from './generated/matrix_sdk_ffi'
 import { applyDiffs } from '../diff'
+import { probeQueueRecovery, SendQueueRecovery, type QueueReachability } from './send-queue-recovery'
 import { extractMentions, markdownToHtml, stripReplyFallback } from '../format'
 import { formatGeoUri, locationTextAlternative, parseGeoUri } from '../location'
 import { forwardBlockReason } from '../forward'
@@ -244,6 +245,7 @@ export class MatrixEngine {
   private syncs = new Map<string, SyncServiceInterface>()
   private handles = new Map<string, TaskHandleInterface[]>()
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
+  private queueRecoveries = new Map<string, { recover: () => Promise<QueueReachability | undefined>; stop: () => void; rejectAuth: () => void; readonly authRejected: boolean }>()
   private refreshFailures = new Map<string, number>()
   private refreshMarkedOffline = new Set<string>()
   // Rooms this client created encrypted: sends wait until the SDK confirms
@@ -520,6 +522,7 @@ export class MatrixEngine {
     }))
   }
   private async checkSessionAlive(id: string, account: Account, syncState: number) {
+    if (this.queueRecoveries.get(id)?.authRejected) return
     const record = savedAccounts()[id]
     const session = record ? (cachedSecrets(id) ?? await loadSecrets(id))?.session : undefined
     if (session?.accessToken && record?.homeserverUrl) {
@@ -528,6 +531,7 @@ export class MatrixEngine {
       try {
         const response = await fetch(`${record.homeserverUrl.replace(/\/*$/, '')}/_matrix/client/v3/account/whoami`,
           { headers: { Authorization: `Bearer ${session.accessToken}` }, signal: controller.signal })
+        if (this.queueRecoveries.get(id)?.authRejected) return
         // 401 alone decides: unknown endpoints must never read as expired.
         if (response.status === 401) {
           this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
@@ -537,9 +541,73 @@ export class MatrixEngine {
       } catch { /* Unreachable homeserver: plain offline below. */ }
       finally { clearTimeout(timeout) }
     }
+    if (this.queueRecoveries.get(id)?.authRejected) return
     this.events.account({ ...account, connection: syncState === 3 ? 'error' : 'offline',
       ...(syncState === 3 ? { error: 'Sync error. Retrying automatically.' } : {}) })
     void this.refreshRooms(id)
+  }
+  private async installQueueRecovery(
+    client: ClientInterface, id: string, account: Account, current: () => boolean, handles: TaskHandleInterface[],
+  ): Promise<boolean> {
+    this.queueRecoveries.get(id)?.stop()
+    const policy = new SendQueueRecovery()
+    let probeController: AbortController | undefined
+    let authRejected = false
+    const recovery = {
+      get authRejected() { return authRejected },
+      rejectAuth: () => { authRejected = true; policy.stop(); probeController?.abort() },
+      stop: () => { policy.stop(); probeController?.abort() },
+      recover: () => authRejected ? Promise.resolve('unauthorized' as const) : policy.recover(async () => {
+        if (!current()) return 'unavailable'
+        const controller = new AbortController()
+        probeController = controller
+        const timeout = setTimeout(() => controller.abort(), 10000)
+        try {
+          // Read the SDK's current session, not a stale saved access token.
+          const session = client.session()
+          const result = await probeQueueRecovery(session, controller.signal)
+          if (!current() || controller.signal.aborted) return 'unavailable'
+          const latest = client.session()
+          // A token refresh during the probe invalidates its verdict, including
+          // a 401 for the old token. Probe the SDK's fresh session next time.
+          if (latest.accessToken !== session.accessToken || latest.userId !== session.userId
+            || latest.homeserverUrl !== session.homeserverUrl) return 'unavailable'
+          if (result === 'unauthorized') {
+            authRejected = true
+            this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
+            this.events.error(id, 'Session expired. Sign in again.')
+          }
+          return result
+        } finally {
+          clearTimeout(timeout)
+          if (probeController === controller) probeController = undefined
+        }
+      }, roomId => {
+        if (!current()) return
+        const room = client.getRoom(roomId)
+        if (!room) throw new Error('The queued room is not available yet.')
+        // Re-enable the original SDK queue, preserving its transaction IDs.
+        room.enableSendQueue(true)
+      }, current),
+    }
+    this.queueRecoveries.set(id, recovery)
+    try {
+      const handle = await client.subscribeToSendQueueUpdates({
+        onUpdate: (roomId, update) => { if (current()) policy.update(roomId, update) },
+      })
+      if (!current()) {
+        handle.cancel()
+        recovery.stop()
+        if (this.queueRecoveries.get(id) === recovery) this.queueRecoveries.delete(id)
+        return false
+      }
+      handles.push(handle)
+      return true
+    } catch (error) {
+      recovery.stop()
+      if (this.queueRecoveries.get(id) === recovery) this.queueRecoveries.delete(id)
+      throw error
+    }
   }
   private async attach(client: ClientInterface, id: string) {
     if (isRemovingSession(id)) throw new Error('Local cleanup is incomplete. Remove this session from this device again.')
@@ -564,9 +632,11 @@ export class MatrixEngine {
     this.syncs.set(id, sync)
     const handles: TaskHandleInterface[] = []
     this.handles.set(id, handles)
+    if (!await this.installQueueRecovery(client, id, account, current, handles)) return
     handles.push(sync.state({ onUpdate: state => {
-      if (!current()) return
+      if (!current() || this.queueRecoveries.get(id)?.authRejected) return
       if (state === 1) {
+        if (this.queueRecoveries.get(id)?.authRejected) return
         this.events.account({ ...account, connection: 'online' })
         void this.refreshRooms(id)
         return
@@ -580,7 +650,11 @@ export class MatrixEngine {
       }
       this.events.account({ ...account, connection: 'connecting' })
     } }))
-    const delegate = client.setDelegate({ didReceiveAuthError: () => { if (current()) this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' }) } })
+    const delegate = client.setDelegate({ didReceiveAuthError: () => {
+      if (!current()) return
+      this.queueRecoveries.get(id)?.rejectAuth()
+      this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
+    } })
     if (delegate) handles.push(delegate)
     const allRooms = await sync.roomListService().allRooms()
     if (!current()) return
@@ -605,18 +679,18 @@ export class MatrixEngine {
     // Room-list poll with exponential backoff while failing, so a dead server
     // does not spin hot and recovery is picked up within a bounded delay.
     const poll = () => {
-      if (!current()) return
+      if (!current() || this.queueRecoveries.get(id)?.authRejected) return
       // Reachability first (it owns the offline detector), then the local
       // room-list refresh; neither step rejects.
       void this.pingServer(id).then(() => this.refreshRooms(id)).finally(() => {
-        if (!current()) return
+        if (!current() || this.queueRecoveries.get(id)?.authRejected) return
         this.timers.set(id, setTimeout(poll, pollDelay(this.refreshFailures.get(id) ?? 0)))
       })
     }
     this.timers.set(id, setTimeout(poll, 4000))
     try { account.name = await client.displayName() } catch { /* MXID fallback */ }
     if (!current()) return
-    this.events.account({ ...account, connection: 'online' })
+    if (!this.queueRecoveries.get(id)?.authRejected) this.events.account({ ...account, connection: 'online' })
     await this.refreshRooms(id)
   }
   async refreshRooms(accountId: string) {
@@ -643,7 +717,7 @@ export class MatrixEngine {
     finally { this.refreshes.delete(accountId) }
   }
   private noteRefreshSuccess(accountId: string) {
-    if (isRemovingSession(accountId)) return
+    if (isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     this.refreshFailures.set(accountId, 0)
     if (this.refreshMarkedOffline.delete(accountId)) {
       const userId = this.clients.get(accountId)?.userId()
@@ -651,7 +725,7 @@ export class MatrixEngine {
     }
   }
   private noteRefreshFailure(accountId: string, error: unknown) {
-    if (isRemovingSession(accountId)) return
+    if (isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     const failures = (this.refreshFailures.get(accountId) ?? 0) + 1
     this.refreshFailures.set(accountId, failures)
     if (isAuthFailure(error)) {
@@ -663,7 +737,7 @@ export class MatrixEngine {
     if (failures >= OFFLINE_AFTER_FAILURES) this.markOffline(accountId)
   }
   private markOffline(accountId: string) {
-    if (this.refreshMarkedOffline.has(accountId)) return
+    if (this.queueRecoveries.get(accountId)?.authRejected || this.refreshMarkedOffline.has(accountId)) return
     this.refreshMarkedOffline.add(accountId)
     const userId = this.clients.get(accountId)?.userId()
     const message = 'Connection lost. Retrying automatically — use Retry connection to probe now.'
@@ -675,27 +749,39 @@ export class MatrixEngine {
   // dead server; failures feed the offline detector above.
   private async pingServer(accountId: string) {
     const client = this.clients.get(accountId)
-    if (!client || !this.alive) return
+    if (!client || !this.alive || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
     try {
       const base = client.homeserver().replace(/\/*$/, '')
       const response = await fetch(`${base}/_matrix/client/versions`, { signal: controller.signal })
       if (!response.ok) throw new Error(`The server answered ${response.status}.`)
+      if (this.clients.get(accountId) !== client) return
+      const recovery = await this.queueRecoveries.get(accountId)?.recover()
+      if (this.clients.get(accountId) !== client) return
+      if (recovery === 'unauthorized') return
+      if (recovery === 'unavailable') throw new Error('Authenticated connection recovery is not available yet.')
       this.noteRefreshSuccess(accountId)
-    } catch (error) { this.noteRefreshFailure(accountId, error) }
+    } catch (error) { if (this.clients.get(accountId) === client) this.noteRefreshFailure(accountId, error) }
     finally { clearTimeout(timeout) }
   }
   // Manual re-probe for an offline or errored account: resets the backoff and
   // checks reachability immediately instead of waiting for the next tick.
   async retryConnection(accountId: string) {
-    const userId = this.getClient(accountId).userId()
+    const client = this.getClient(accountId)
+    const userId = client.userId()
+    if (this.queueRecoveries.get(accountId)?.authRejected) {
+      this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'error', error: 'Session expired. Sign in again.' })
+      return
+    }
     this.refreshFailures.set(accountId, 0)
     this.refreshMarkedOffline.delete(accountId)
     this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'connecting' })
     await this.pingServer(accountId)
+    if (this.clients.get(accountId) !== client || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     if ((this.refreshFailures.get(accountId) ?? 0) === 0) {
       await this.refreshRooms(accountId)
+      if (this.clients.get(accountId) !== client || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
       this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'online' })
     } else this.markOffline(accountId)
   }
@@ -1805,6 +1891,8 @@ export class MatrixEngine {
     }
     await attempt('tombstone', () => markSessionRemoving(accountId))
     this.attachTokens.set(accountId, (this.attachTokens.get(accountId) ?? 0) + 1)
+    this.queueRecoveries.get(accountId)?.stop()
+    this.queueRecoveries.delete(accountId)
     await attempt('sync-stop', () => this.syncs.get(accountId)?.stop())
     for (const handle of this.handles.get(accountId) ?? []) await attempt('cancel-handles', () => handle.cancel())
     const timer = this.timers.get(accountId)
@@ -1841,6 +1929,8 @@ export class MatrixEngine {
   }
   async dispose() {
     this.alive = false
+    for (const recovery of this.queueRecoveries.values()) recovery.stop()
+    this.queueRecoveries.clear()
     this.oidcFlows.clear()
     this.ssoFlows.clear()
     for (const controller of this.verificationControllers.values()) controller.setDelegate(undefined)
