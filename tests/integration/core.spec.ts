@@ -4,10 +4,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { MatrixEngine } from '../../src/sdk/engine'
 import type { Account, Room, Message } from '../../src/types'
-import { backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse } from './fixture-contract'
+import { verificationUser, type FixtureUsers, type VerificationScenario, backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse } from './fixture-contract'
 
 interface FixtureUser { username: string; password: string; userId: string; token: string }
-interface Fixture { base: string; version: string; users: FixtureUser[]; scenarioUsers?: { backupMigration?: FixtureUser } }
+interface Fixture extends FixtureUsers { base: string; version: string }
 declare global {
   interface Window {
     directoryTestIds: string[]
@@ -129,6 +129,32 @@ async function findMessage(page: Page, accountId: string, roomId: string, body: 
   { accountId, roomId, body })).toBe(true)
   return page.evaluate(({ accountId, roomId, body }) =>
     window.matrixTest.messages[accountId + '/' + roomId].find(message => message.body === body)!, { accountId, roomId, body })
+}
+
+// Device verification requests target only already self-signed devices in the
+// pinned Rust SDK. Two fresh logins of shared Alice are not a valid pairing.
+// Give each scenario an isolated identity and establish the receiving device
+// through normal recovery setup before creating the unverified requester.
+async function verificationPair(pa: Page, pb: Page, scenario: VerificationScenario) {
+  const user = verificationUser(fixture, scenario)
+  await boot(pa); await boot(pb)
+  const b = await login(pb, user)
+  await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+  await pb.evaluate(async b => {
+    // Keep the generated recovery key in this page; never return or log it.
+    await window.matrixTest.engine.enableRecovery(b, () => {})
+  }, b)
+  await expect.poll(() => pb.evaluate(async b => (await window.matrixTest.engine.security(b)).verified, b))
+    .toBe('Verified')
+  const a = await login(pa, user)
+  await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
+  await expect.poll(() => pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a))
+    .toBe('Unverified')
+  // Wait for the requester's SDK to discover a signed recipient rather than
+  // sending to an empty device list while the initial key query is pending.
+  await expect.poll(() => pa.evaluate(a => window.matrixTest.engine.getClient(a).encryption().hasDevicesToVerifyAgainst(), a))
+    .toBe(true)
+  return { a, b }
 }
 
 test('live password login, simultaneous account isolation, restoration and logout', async ({ page }) => {
@@ -291,7 +317,31 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
     const loginVia = async (page: Page, user: FixtureUser) => page.evaluate(({ base, username, password }) =>
       window.matrixTest.engine.login(base, username, password),
     { base: viaProxy, username: user.username, password: user.password })
+    // Synapse advertises its direct public_baseurl in the login response.
+    // Keep this client's discovery on the disposable proxy; otherwise the SDK
+    // correctly follows well_known and silently bypasses the blackout.
+    const proxyLogin = (url: URL) => url.origin === viaProxy && /^\/_matrix\/client\/(?:v3|r0)\/login$/.test(url.pathname)
+    await pa.route(proxyLogin, async route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      const response = await route.fetch()
+      if (!response.ok()) return route.fulfill({ response })
+      const login = await response.json()
+      login.well_known = {
+        ...login.well_known,
+        'm.homeserver': { ...login.well_known?.['m.homeserver'], base_url: viaProxy },
+      }
+      const headers = response.headers()
+      // The response body changed; let Playwright compute its new length.
+      delete headers['content-length']
+      delete headers['content-encoding']
+      await route.fulfill({ response, headers, json: login })
+    })
     const a = await loginVia(pa, alice)
+    await pa.unroute(proxyLogin)
+    expect(await pa.evaluate(a => {
+      const record = JSON.parse(localStorage.getItem('fern.sessions.v1') ?? '{}')[a]
+      return record?.homeserverUrl ? new URL(record.homeserverUrl).origin : null
+    }, a)).toBe(viaProxy)
     const b = await login(pb, bob)
     const { room_id: roomId } = await matrix(request, reference, 'POST', '/createRoom', {
       name: 'Offline queue fixture', visibility: 'public', preset: 'public_chat',
@@ -308,6 +358,14 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
     // SDK retries internally without flipping its service state), so downtime
     // status is asserted only on the send queue below. See issue #8.
     try {
+      // Prove the endpoint used by the persisted SDK session is unreachable,
+      // not merely that a separate proxy listener was stopped.
+      expect(await pa.evaluate(async base => {
+        try {
+          await fetch(base + '/_matrix/client/versions', { cache: 'no-store', signal: AbortSignal.timeout(5000) })
+          return false
+        } catch { return true }
+      }, viaProxy)).toBe(true)
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Queued while offline'), { a, roomId })
       // The local echo stays pending while the network is down.
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
@@ -656,11 +714,7 @@ test('same-account device verification accepts and compares SAS on both devices'
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationAccept')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -695,6 +749,7 @@ test('same-account device verification accepts and compares SAS on both devices'
     await pb.evaluate(b => window.matrixTest.engine.finishVerification(b, true), b)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification.some(value => value.status === 'verified'))).toBe(true)
     await expect.poll(() => pb.evaluate(() => window.matrixTest.verification.some(value => value.status === 'verified'))).toBe(true)
+    await expect.poll(() => pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Verified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()
@@ -707,11 +762,7 @@ test('unanswered verification request stays pending, cancels cleanly and allows 
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationCancel')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -750,6 +801,7 @@ test('unanswered verification request stays pending, cancels cleanly and allows 
     await pa.evaluate(a => window.matrixTest.engine.cancelVerification(a), a)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification
       .filter(value => value.status === 'canceled').length)).toBeGreaterThan(1)
+    expect(await pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Unverified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()
@@ -762,11 +814,7 @@ test('same-account device verification can reject a SAS comparison', async ({ br
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationReject')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -786,6 +834,7 @@ test('same-account device verification can reject a SAS comparison', async ({ br
     await pb.evaluate(b => window.matrixTest.engine.finishVerification(b, false), b)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification.some(value => value.status === 'canceled' || value.status === 'failed'))).toBe(true)
     await expect.poll(() => pb.evaluate(() => window.matrixTest.verification.some(value => value.status === 'canceled' || value.status === 'failed'))).toBe(true)
+    expect(await pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Unverified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()

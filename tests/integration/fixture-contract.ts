@@ -1,8 +1,9 @@
 // Helpers for disposable integration fixtures, never application/runtime code.
 export interface DisposableUser { username: string; password: string; userId: string; token: string }
-interface FixtureUsers {
+export type VerificationScenario = 'verificationAccept' | 'verificationCancel' | 'verificationReject'
+export interface FixtureUsers {
   users: DisposableUser[]
-  scenarioUsers?: { backupMigration?: DisposableUser }
+  scenarioUsers?: Partial<Record<'backupMigration' | VerificationScenario, DisposableUser>>
 }
 
 export function backupMigrationUser(fixture: FixtureUsers): DisposableUser {
@@ -13,6 +14,20 @@ export function backupMigrationUser(fixture: FixtureUsers): DisposableUser {
   }
   if (fixture.users.some(shared => shared.userId === user.userId)) {
     throw new Error('Backup migration must not reuse a shared fixture account.')
+  }
+  return user
+}
+
+export function verificationUser(fixture: FixtureUsers, scenario: VerificationScenario): DisposableUser {
+  const user = fixture.scenarioUsers?.[scenario]
+  if (!user || ![user.username, user.password, user.userId, user.token]
+    .every(value => typeof value === 'string' && value.length > 0)) {
+    throw new Error('The disposable fixture has no complete verification account.')
+  }
+  if (fixture.users.some(shared => shared.userId === user.userId)
+    || Object.entries(fixture.scenarioUsers ?? {}).some(([key, other]) =>
+      key !== scenario && other?.userId === user.userId)) {
+    throw new Error('Verification must not reuse another fixture account.')
   }
   return user
 }
