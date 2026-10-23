@@ -1,3 +1,4 @@
+import { isPasswordLoginRejected } from './login'
 import { VisibleReadAcknowledger, type ReadTarget } from './read-acknowledgment'
 import { reactive, computed, watch, ref } from 'vue'
 import { demoAccounts, demoRooms, demoMembers, initialDemoMessages } from './demo'
@@ -1189,12 +1190,17 @@ export function closeQr() {
 }
 // Runs a scanned code: validates it locally first (no server contact), then
 // scans. Cancellation aborts silently; other failures surface actionably.
-export async function submitQrBytes(bytes: Uint8Array, server?: string, redirectUri?: string) {
+export async function submitQrBytes(bytes: Uint8Array, server?: string, redirectUri?: string, logicalServer = false) {
   const flow = qrFlow.value
   if (!flow) return
   state.error = ''
-  const decoded = await action(() => decodeQrLoginBytes(bytes))
-  if (!decoded) return
+  let decoded
+  try { decoded = await decodeQrLoginBytes(bytes) }
+  catch (error) {
+    if (qrFlow.value === flow) state.error = error instanceof Error ? error.message : String(error)
+    return
+  }
+  if (qrFlow.value !== flow) return
   flow.serverName = decoded.serverName
   if (isDemo.value) {
     state.error = flow.role === 'login'
@@ -1221,12 +1227,12 @@ export async function submitQrBytes(bytes: Uint8Array, server?: string, redirect
       if (qrFlow.value === flow && !signal.aborted) notify('New device linked')
     } else {
       const id = await engine.loginQrLogin(decoded.serverName ?? server!, bytes,
-        redirectUri ?? `${location.origin}/oidc-callback.html`, onProgress, signal)
+        redirectUri ?? `${location.origin}/oidc-callback.html`, onProgress, signal, Boolean(decoded.serverName) || logicalServer)
       if (qrFlow.value === flow && !signal.aborted) { switchAccount(id); retireDemo(); notify('Account connected') }
     }
   } catch (error) {
     // A cancelled scan is silent: the dialog is already gone by design.
-    if (!signal.aborted) state.error = error instanceof Error ? error.message : String(error)
+    if (qrFlow.value === flow && !signal.aborted) state.error = error instanceof Error ? error.message : String(error)
   }
 }
 export async function retrySend(message: Message) {
@@ -1243,11 +1249,27 @@ export function typingNotice() {
   if (isDemo.value || !room.value || Date.now() - typingAt < 4000) return
   typingAt = Date.now(); void action(() => engine.typing(state.activeAccountId, state.activeRoomId, true))
 }
-export async function signIn(server: string, username: string, password: string) {
+export const passwordLoginRejected = ref(false)
+async function ownedAuthAction<T>(fn: () => Promise<T>, owns: () => boolean): Promise<T | undefined> {
+  if (owns()) state.error = ''
+  try { return await fn() }
+  catch (error) { if (owns()) state.error = error instanceof Error ? error.message : String(error); return undefined }
+}
+export async function signIn(server: string, username: string, password: string, owns: () => boolean = () => true, logicalServer = false) {
   state.busy = true
-  const id = await action(() => engine.login(server, username, password))
+  passwordLoginRejected.value = false
+  const id = await ownedAuthAction(async () => {
+    try { return await engine.login(server, username, password, false, logicalServer) }
+    catch (error) {
+      if (owns()) passwordLoginRejected.value = isPasswordLoginRejected(error)
+      // Do not echo server-controlled details (which may include credentials).
+      throw new Error(passwordLoginRejected.value
+        ? 'Sign-in was not accepted. Check your homeserver, username and password.'
+        : 'Sign-in could not finish. Check your connection and homeserver, then try again.')
+    }
+  }, owns)
   state.busy = false
-  if (id) { switchAccount(id); retireDemo(); notify('Account connected') }
+  if (id && owns()) { switchAccount(id); retireDemo(); notify('Account connected') }
   return id
 }
 // A real account replaces every tour fixture, not just the personal demo.
@@ -1473,22 +1495,24 @@ export async function disableAppPin(pin: string): Promise<boolean> {
 // Registration creates the account server-side, then signs in normally so
 // the session path stays identical to password login. SSO-only servers
 // report 'sso' so the UI can route through the provider instead.
-export async function registerAccount(server: string, username: string, password: string): Promise<'ok' | 'sso' | false> {
+export async function registerAccount(server: string, username: string, password: string, owns: () => boolean = () => true, registrationServer = server): Promise<'ok' | 'sso' | false> {
   // Registration needs no signed-in account: demo users onboard this way.
   state.busy = true
   try {
-    const available = await action(() => engine.registerAvailable(server, username))
-    if (available === undefined) return false
+    const available = await ownedAuthAction(() => engine.registerAvailable(registrationServer, username), owns)
+    if (available === undefined || !owns()) return false
     if (!available) { state.error = 'That username is taken on this server.'; return false }
     try {
-      await engine.register(server, username, password)
+      await engine.register(registrationServer, username, password)
     } catch (error) {
+      if (!owns()) return false
       if ((error as { ssoRequired?: boolean }).ssoRequired) { state.error = (error as Error).message; return 'sso' }
       state.error = error instanceof Error ? error.message : String(error)
       return false
     }
-    const id = await action(() => engine.login(server, username, password))
-    if (!id) return false
+    if (!owns()) return false
+    const id = await ownedAuthAction(() => engine.login(server, username, password), owns)
+    if (!id || !owns()) return false
     switchAccount(id); retireDemo(); notify('Account created and connected')
     return 'ok'
   } finally { state.busy = false }

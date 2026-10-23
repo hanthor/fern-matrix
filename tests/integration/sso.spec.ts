@@ -94,7 +94,7 @@ test('legacy SSO round trip authenticates two accounts independently', async ({ 
     await boot(page)
     // The OIDC-only homeserver advertises no password login.
     const methods = await page.evaluate(base => window.matrixTest.engine.loginMethods(base), fixture.base)
-    expect(methods).toEqual({ password: false, sso: true, oidc: false })
+    expect(methods).toEqual({ password: false, sso: true, oidc: false, homeserverUrl: new URL(fixture.base).href })
     const a = await ssoLogin(page, 'Alice')
     await expect.poll(() => page.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
     expect(await page.evaluate(a => window.matrixTest.engine.getClient(a).userId(), a)).toBe(alice.userId)

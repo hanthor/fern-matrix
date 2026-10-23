@@ -77,7 +77,7 @@ test('native OIDC round trip authenticates two accounts independently', async ({
     await boot(page)
     // Spindle with the built-in provider keeps password login beside OIDC.
     const methods = await page.evaluate(base => window.matrixTest.engine.loginMethods(base), fixture.base)
-    expect(methods).toEqual({ password: true, sso: false, oidc: true })
+    expect(methods).toEqual({ password: true, sso: false, oidc: true, homeserverUrl: new URL(fixture.base).href })
     const a = await oidcLogin(page, alice)
     await expect.poll(() => page.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
     expect(await page.evaluate(a => window.matrixTest.engine.getClient(a).userId(), a)).toBe(alice.userId)

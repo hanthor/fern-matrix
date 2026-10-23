@@ -2,8 +2,10 @@
 import { visibleEventBottom } from './read-acknowledgment'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FrappeUIProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
-import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert } from 'lucide-vue-next'
+import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert, QrCode } from 'lucide-vue-next'
 import UserAvatar from './components/UserAvatar.vue'
+import { loginDestination, type LoginDestination } from './login'
+import LoginFields from './components/LoginFields.vue'
 import FernFractal from './components/FernFractal.vue'
 import { saveSessionDraft, readSessionDraft, isSessionRemoving } from './session-storage'
 import SessionExitDialog from './components/SessionExitDialog.vue'
@@ -26,12 +28,14 @@ import { isTauri, onDeepLink, openExternal, checkAppUpdate, installAppUpdate } f
 import { useI18n } from 'vue-i18n'
 import { setLocale, localeNames, type Locale } from './i18n'
 import { accent, ACCENT_OPTIONS, setAccent } from './accent'
-import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, captureMessageFocus, ownsMessageFocusError, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
+import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, captureMessageFocus, ownsMessageFocusError, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, passwordLoginRejected, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
 const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
 const form = ref({ server: 'matrix.org', username: '', password: '', name: '', topic: '', invite: '', alias: '', question: '', answers: 'A calmer workspace\nBetter mobile conversations', undisclosed: false, recoveryKey: '', newPassword: '', email: '', emailCode: '', accountPassword: '', deactivateAck: false, eraseData: true })
 const loginMode = ref<'signin' | 'register'>('signin')
+const qrLoginDestination = ref<{ server: string; logicalServer: boolean }>()
+const currentLoginDestination = computed(() => loginDestination(modal.value === 'login' && loginMode.value === 'register' ? '' : form.value.username, form.value.server))
 const draft = ref('')
 const reply = ref<Message>()
 const edit = ref<Message>()
@@ -314,7 +318,7 @@ const roomOptions = computed(() => [
   { label: t('nav.copyRoomLink'), icon: ArrowUpRight, onClick: () => action(async () => { if (isDemo.value) { notify('Demo rooms have no public Matrix link'); return }; await navigator.clipboard.writeText(`https://matrix.to/#/${encodeURIComponent(state.activeRoomId)}`); notify('Room link copied') }) },
   { label: t('nav.leaveRoom'), icon: LogOut, onClick: () => open('leave') },
 ])
-function exploreDemo() { seedDemo(); switchAccount('demo-home'); state.mobileRoom = false }
+function exploreDemo() { if (modalBusy.value) return; form.value.password = ''; passwordLoginRejected.value = false; seedDemo(); switchAccount('demo-home'); state.mobileRoom = false }
 function open(value: string, mode: 'signin' | 'register' = 'signin') { state.error = ''; setTimeout(() => { modal.value = value; if (value === 'login') loginMode.value = mode; if (value === 'settings') { profileName.value = account.value?.name ?? ''; if (settingsTab.value === 'security') void loadAccountSections() }; if (value === 'explore') void loadDirectory(); if (value === 'roomsettings') void loadRoomSettings() }, 0) }
 function chooseRoom(value: Room) { if (value.accountId !== state.activeAccountId) switchAccount(value.accountId); reply.value = undefined; edit.value = undefined; endOfHistory.value = false; void selectRoom(value) }
 // Unified inbox: one room list across accounts, newest first. The space rail
@@ -448,27 +452,40 @@ function oidcRedirectUri() {
   if (isTauri()) return 'fernmatrix://oidc-callback'
   return new URL('oidc-callback.html', location.href).href
 }
-async function startSso() {
-  // Starting over abandons any previous pending request; nothing was saved.
-  if (oidcFlow) {
-    oidcPopup?.close(); oidcPopup = null
-    await action(() => (oidcKind === 'sso' ? engine.cancelSsoLogin(oidcFlow) : engine.cancelOidcLogin(oidcFlow)))
-    oidcFlow = ''
-  }
+async function startSso(choice?: LoginDestination) {
+  if (modalBusy.value) return
+  passwordLoginRejected.value = false
+  form.value.password = ''
+  const generation = authViewGeneration
+  const destination = choice ?? currentLoginDestination.value
+  if (destination.error) { state.error = t(`login.${destination.error}`); return }
+  const { server, logicalServer } = destination
+  const owns = () => generation === authViewGeneration
   modalBusy.value = true
   try {
-    const methods = await action(() => engine.loginMethods(form.value.server))
-    if (!methods) return
+    // Starting over abandons any previous pending request; nothing was saved.
+    if (oidcFlow) {
+      const previousFlow = oidcFlow, previousKind = oidcKind
+      oidcFlow = ''; oidcPopup?.close(); oidcPopup = null
+      await authAction(() => previousKind === 'sso' ? engine.cancelSsoLogin(previousFlow) : engine.cancelOidcLogin(previousFlow), owns)
+      if (!owns()) return
+    }
+    const methods = await authAction(() => engine.loginMethods(server, logicalServer), owns)
+    if (!methods || !owns()) return
     // Prefer modern OIDC; fall back to legacy SSO where that is all the
     // homeserver offers. Either way nothing is saved until approval lands.
     const starter = methods.oidc
-      ? { kind: 'oidc' as const, run: (uri: string) => engine.startOidcLogin(form.value.server, uri) }
+      ? { kind: 'oidc' as const, run: (uri: string) => engine.startOidcLogin(server, uri, undefined, false, logicalServer) }
       : methods.sso
-        ? { kind: 'sso' as const, run: (uri: string) => engine.startSsoLogin(form.value.server, uri) }
+        ? { kind: 'sso' as const, run: (uri: string) => engine.startSsoLogin(server, uri, logicalServer) }
         : undefined
     if (!starter) { state.error = 'This homeserver does not advertise SSO or modern login.'; return }
-    const started = await action(() => starter.run(oidcRedirectUri()))
+    const started = await authAction(() => starter.run(oidcRedirectUri()), owns)
     if (!started) return
+    if (!owns()) {
+      await (starter.kind === 'sso' ? engine.cancelSsoLogin(started.flowId) : engine.cancelOidcLogin(started.flowId)).catch(() => {})
+      return
+    }
     oidcKind = starter.kind
     oidcFlow = started.flowId
     if (isTauri()) {
@@ -484,7 +501,7 @@ async function startSso() {
         return
       }
     }
-    modal.value = ''
+    if (owns()) modal.value = ''
   } finally { modalBusy.value = false }
 }
 function onOidcMessage(event: MessageEvent) {
@@ -510,20 +527,84 @@ function completeOidcFromUrl(url: string) {
     if (id) { switchAccount(id); retireDemo(); notify('Account connected') }
   })()
 }
+// One auth form model and controller serve the landing page and Add account.
+let authViewGeneration = 0
+watch(modal, () => { authViewGeneration++ }, { flush: 'sync' })
+async function authAction<T>(fn: () => Promise<T>, owns: () => boolean): Promise<T | undefined> {
+  if (owns()) state.error = ''
+  try { return await fn() }
+  catch (error) { if (owns()) state.error = error instanceof Error ? error.message : String(error); return undefined }
+}
+watch(() => [form.value.server, form.value.username, loginMode.value], () => { passwordLoginRejected.value = false })
+function startQrLogin() {
+  if (modalBusy.value) return
+  form.value.password = ''; passwordLoginRejected.value = false
+  const destination = currentLoginDestination.value
+  if (destination.error) { state.error = t(`login.${destination.error}`); return }
+  qrLoginDestination.value = { server: destination.server, logicalServer: destination.logicalServer }
+  openQr('login'); modal.value = 'qrlogin'
+}
+async function openRegistration() {
+  if (modalBusy.value) return
+  form.value.password = ''; passwordLoginRejected.value = false
+  const selected = currentLoginDestination.value
+  if (selected.error) { state.error = t(`login.${selected.error}`); return }
+  modalBusy.value = true
+  const generation = authViewGeneration
+  const { server, logicalServer } = selected
+  const owns = () => generation === authViewGeneration
+  try {
+    const methods = await authAction(() => engine.loginMethods(server, logicalServer), owns)
+    if (!methods || !owns()) return
+    if (!methods.password && (methods.oidc || methods.sso)) {
+      modalBusy.value = false
+      await startSso(selected)
+      return
+    }
+    // Explicit transition only: retain the logical destination, ask for a new password.
+    form.value.server = server
+    if (logicalServer) form.value.username = form.value.username.slice(1, form.value.username.indexOf(':'))
+    loginMode.value = 'register'; modal.value = 'login'
+  } finally { modalBusy.value = false }
+}
+async function submitLogin() {
+  if (modalBusy.value) return
+  passwordLoginRejected.value = false
+  const registering = modal.value === 'login' && loginMode.value === 'register'
+  const destination = loginDestination(form.value.username, form.value.server, registering)
+  if (destination.error) { state.error = t(`login.${destination.error}`); form.value.password = ''; return }
+  modalBusy.value = true
+  const generation = authViewGeneration
+  const credentials = { server: destination.server, username: form.value.username, password: form.value.password }
+  const owns = () => generation === authViewGeneration
+  try {
+    const methods = await authAction(() => engine.loginMethods(credentials.server, destination.logicalServer), owns)
+    if (!methods || !owns()) return
+    if (!methods.password) {
+      if (methods.oidc || methods.sso) {
+        modalBusy.value = false
+        await startSso(destination)
+      } else state.error = t('login.passwordUnavailable')
+      return
+    }
+    if (registering) {
+      const created = await registerAccount(credentials.server, credentials.username, credentials.password, owns, methods.homeserverUrl ?? credentials.server)
+      if (!owns()) return
+      if (created === 'sso') { modalBusy.value = false; await startSso(destination); return }
+      if (created === 'ok') modal.value = ''
+    } else {
+      const signedIn = await signIn(credentials.server, credentials.username, credentials.password, owns, destination.logicalServer)
+      if (owns() && signedIn) modal.value = ''
+      if (!owns()) passwordLoginRejected.value = false
+    }
+  } finally { form.value.password = ''; modalBusy.value = false }
+}
 async function modalSubmit() {
+  if (modal.value === 'login') { await submitLogin(); return }
   if (modalBusy.value) return
   modalBusy.value = true
   try {
     let success: unknown
-    if (modal.value === 'login') {
-      if (loginMode.value === 'register') {
-        const created = await registerAccount(form.value.server, form.value.username, form.value.password)
-        // SSO-only servers provision through the provider: route there now.
-        if (created === 'sso') { modalBusy.value = false; await startSso(); return }
-        success = created === 'ok'
-      } else success = await signIn(form.value.server, form.value.username, form.value.password)
-      form.value.password = ''
-    }
     if (modal.value === 'create' || modal.value === 'dm') success = await createRoom(form.value.name || form.value.invite, form.value.topic, modal.value === 'dm' ? form.value.invite : undefined)
     if (modal.value === 'createspace') success = await createSpace(form.value.name, form.value.topic)
     if (modal.value === 'join') success = await joinRoom(form.value.alias)
@@ -1101,7 +1182,8 @@ watch(() => state.jumpToEvent, id => {
   state.jumpToEvent = ''
   void navigateToEvent(accountId, roomId, id)
 }, { flush: 'sync' })
-watch(modal, (_value, previous) => {
+watch(modal, (value, previous) => {
+  if (previous === 'login' && value !== 'login') { form.value.password = ''; passwordLoginRejected.value = false }
   if (previous === 'explore') { ++directoryGeneration; directorySession?.stop(); directorySession = undefined }
   if (previous === 'call') { ++callGeneration; stopCall?.(); stopCall = undefined; callIframe = undefined }
   if (previous === 'widget') { ++widgetGeneration; stopWidget?.(); stopWidget = undefined; widgetIframe = undefined; activeWidget.value = null }
@@ -1204,7 +1286,7 @@ watch(() => [timeline.value, threadPane.value, state.activeAccountId, state.acti
   roomReadReady.value, threadReadReady.value, pendingEventNavigation.value, focused.value, state.messageQuery, modal.value, forwardOpen.value, sessionExit.state.target,
   state.details, state.thread, latestConfirmedReadEvent.value?.id, latestConfirmedThreadEvent.value?.id, confirmedThreadEvents.value.length], scheduleReadCheck, { flush: 'sync' })
 onMounted(() => { startReadVisibility(); document.addEventListener('keydown', shortcut); document.addEventListener('pointerdown', pokeLock); document.addEventListener('keydown', pokeLock); watchLock(); window.addEventListener('message', onOidcMessage); window.visualViewport?.addEventListener('resize', viewportReveal); void onDeepLink(completeOidcFromUrl).then(stop => { stopDeepLink = stop ?? undefined }); void initialize(); void scrollToEnd() })
-onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; clearFocus(); pendingEventNavigation.value = undefined; clearTimeout(jumpFlashTimer); stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
+onUnmounted(() => { ++authViewGeneration; form.value.password = ''; passwordLoginRejected.value = false; messageNavigationDisposed = true; ++messageJumpGeneration; clearFocus(); pendingEventNavigation.value = undefined; clearTimeout(jumpFlashTimer); stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
 </script>
 
 <template>
@@ -1230,10 +1312,19 @@ onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; c
           <span class="eyebrow">FERN · MATRIX</span>
           <h1 id="gate-title">{{ t('gate.title') }}</h1>
           <p>{{ t('gate.subtitle') }}</p>
+          <form class="gate-login" :aria-label="t('login.submitConnect')" @submit.prevent="submitLogin">
+            <LoginFields v-model:server="form.server" v-model:username="form.username" v-model:password="form.password" :busy="modalBusy"/>
+            <Alert v-if="state.error && !modal" theme="red" :title="state.error" role="alert"/>
+            <div class="gate-signin-actions">
+              <Button variant="solid" theme="green" type="submit" :loading="modalBusy">{{ t('login.submitConnect') }}</Button>
+              <Tooltip :text="t('login.scanQr')"><Button type="button" variant="outline" :aria-label="t('login.scanQr')" :disabled="modalBusy" @click="startQrLogin"><QrCode :size="20"/></Button></Tooltip>
+            </div>
+            <Button type="button" variant="ghost" class="register-link" :disabled="modalBusy" @click="openRegistration">{{ t('login.register') }}</Button>
+            <p v-if="passwordLoginRejected" class="registration-hint" role="status">{{ t('login.registerHint') }}</p>
+            <Button type="button" variant="outline" :disabled="modalBusy" @click="startSso()">{{ t('login.sso') }}</Button>
+          </form>
           <div class="gate-actions">
-            <Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button>
-            <Button variant="outline" @click="open('login', 'register')">{{ t('login.createAccount') }}</Button>
-            <Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button>
+            <Button variant="ghost" :disabled="modalBusy" @click="exploreDemo">{{ t('gate.explore') }}</Button>
           </div>
         </div>
       </main>
@@ -1290,7 +1381,7 @@ onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; c
   <Dialog v-model:open="modalOpen" :title="dialogTitle" :size="modal === 'call' || modal === 'widget' ? '5xl' : modal === 'settings' ? '2xl' : 'lg'">
     <Alert v-if="state.error" theme="red" :title="state.error"/>
     <form v-if="['login', 'create', 'createspace', 'dm', 'join', 'poll', 'invite'].includes(modal)" class="dialog-form" @submit.prevent="modalSubmit">
-      <template v-if="modal === 'login'"><div class="login-description"><span><Leaf :size="24"/></span><p>{{ t('login.tagline1') }}<br/>{{ t('login.tagline2') }}</p></div><FormControl v-model="form.server" :label="t('login.server')" placeholder="matrix.org" required/><FormControl v-model="form.username" :label="t('login.username')" placeholder="@you:matrix.org" autocomplete="username" required/><FormControl v-model="form.password" type="password" :label="t('login.password')" autocomplete="current-password" required/><p class="form-note">{{ t('login.note') }}</p><Button variant="outline" :loading="modalBusy" @click.prevent="startSso">{{ t('login.sso') }}</Button><Button variant="outline" @click.prevent="openQr('login'); modal = 'qrlogin'">{{ t('login.qr') }}</Button><p class="form-note">{{ t('login.ssoNote') }}</p><template v-if="loginMode === 'register'"><p class="form-note">{{ t('login.registerNote') }}</p></template><div class="dialog-actions"><Button variant="ghost" @click="loginMode = loginMode === 'register' ? 'signin' : 'register'">{{ loginMode === 'register' ? t('login.backToSignin') : t('login.createAccount') }}</Button></div></template>
+      <template v-if="modal === 'login'"><div class="login-description"><span><Leaf :size="24"/></span><p>{{ t('login.tagline1') }}<br/>{{ t('login.tagline2') }}</p></div><LoginFields v-model:server="form.server" v-model:username="form.username" v-model:password="form.password" :registering="loginMode === 'register'" :busy="modalBusy"/><p class="form-note">{{ t('login.note') }}</p><Button variant="outline" :loading="modalBusy" @click.prevent="startSso()">{{ t('login.sso') }}</Button><Button variant="outline" :disabled="modalBusy" @click.prevent="startQrLogin">{{ t('login.scanQr') }}</Button><p class="form-note">{{ t('login.ssoNote') }}</p><p v-if="passwordLoginRejected" class="form-note" role="status">{{ t('login.registerHint') }}</p><template v-if="loginMode === 'register'"><p class="form-note">{{ t('login.registerNote') }}</p></template><div class="dialog-actions"><Button variant="ghost" type="button" :disabled="modalBusy" @click="loginMode === 'register' ? loginMode = 'signin' : openRegistration()">{{ loginMode === 'register' ? t('login.backToSignin') : t('login.createAccount') }}</Button></div></template>
       <template v-if="modal === 'create'"><FormControl v-model="form.name" label="Room name" placeholder="A name for your space" required/><FormControl v-model="form.topic" type="textarea" label="Topic" placeholder="What will you talk about?"/><p class="form-note"><LockKeyhole :size="13"/>New rooms are private and encrypted.</p></template>
       <template v-if="modal === 'createspace'"><FormControl v-model="form.name" label="Space name" placeholder="A name for your community" required/><FormControl v-model="form.topic" type="textarea" label="Topic" placeholder="What is this space about?"/><p class="form-note">New spaces are private and unencrypted. Add rooms to them from Room settings.</p></template>
       <template v-if="modal === 'dm' || modal === 'invite'"><FormControl v-model="form.invite" label="Matrix user ID" placeholder="@someone:matrix.org" pattern="^@.+:.+$" required/><p class="form-note">{{ modal === 'dm' ? 'Start a private, encrypted conversation.' : 'They’ll receive an invitation to this room.' }}</p></template>
@@ -1310,7 +1401,7 @@ onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; c
     <WidgetView v-if="modal === 'widget' && activeWidget" :widget="activeWidget" :status="widgetStatus" :error="widgetError" @iframe="catchWidgetIframe" @approve="approveWidgetOpen" @decline="modal = ''" @leave="modal = ''" @retry="retryWidget" @close="modal = ''"/>
     <CallView v-if="modal === 'call' && room" :room-name="room.name" :direct="room.direct" :encrypted="room.encrypted" :status="callStatus" :error="callError" @iframe="callIframe = $event" @join="joinCall" @leave="modal = ''" @retry="retryCall" @close="modal = ''"/>
     <div v-if="modal === 'verify'" class="verification-view"><ShieldCheck :size="38"/><h3>{{ verification.status === 'verified' ? 'Device verified' : verification.status === 'compare' ? 'Do these match?' : verification.status === 'incoming' ? 'A device wants to verify' : verification.status === 'mismatch' ? 'Comparison did not match' : 'Check your other device' }}</h3><p v-if="verification.status === 'waiting' || verification.status === 'requested'">Open another Matrix device and accept this verification request.</p><p v-if="verification.status === 'incoming'">{{ verification.deviceName }} is requesting to verify this session. Only continue if you started this request on a device you control.</p><p v-if="verification.status === 'accepted' || verification.status === 'comparing'">Waiting for the security comparison…</p><p v-if="verification.status === 'compare'">Compare these with your other device. Only approve if every value matches.</p><div v-if="verification.emojis" class="verification-emojis"><span v-for="emoji in verification.emojis" :key="emoji.description"><strong>{{ emoji.symbol }}</strong><small>{{ emoji.description }}</small></span></div><div v-if="verification.numbers" class="verification-numbers">{{ verification.numbers.join(' · ') }}</div><p v-if="verification.status === 'verified'">Your devices can now trust each other.</p><p v-if="verification.status === 'mismatch'">Neither device was verified. Close this dialog and start again if you want to compare a new request.</p><p v-if="verification.status === 'failed' || verification.status === 'canceled'">Verification {{ verification.status }}. Close this dialog and try again.</p><div class="dialog-actions"><template v-if="verification.status === 'incoming'"><Button theme="red" variant="outline" @click="closeVerification">Decline request</Button><Button variant="solid" theme="green" @click="acceptIncomingVerification">Accept request</Button></template><template v-else-if="verification.status === 'compare'"><Button theme="red" variant="outline" @click="approveVerification(false)">They don’t match</Button><Button variant="solid" theme="green" @click="approveVerification(true)">They match</Button></template><Button v-else variant="outline" @click="closeVerification">{{ verification.status === 'verified' || verification.status === 'mismatch' ? 'Done' : 'Close' }}</Button></div></div>
-    <div v-if="modal === 'qrlogin'"><QrScan role="login" :server="form.server" @close="modal = ''"/></div>
+    <div v-if="modal === 'qrlogin'"><QrScan role="login" :server="qrLoginDestination?.server" :logical-server="qrLoginDestination?.logicalServer" :redirect-uri="oidcRedirectUri()" @close="modal = ''"/></div>
     <div v-if="modal === 'qrgrant'"><QrScan role="grant" @close="modal = ''"/></div>
     <div v-if="modal === 'help'" class="help-content"><span class="welcome-logo"><Leaf :size="35"/></span><h2>A calmer place to connect.</h2><p>Fern speaks Frappe UI on Matrix: Frappe components in a spaces-and-accounts layout.</p><p>The demo is local. Connect an account for real encrypted messaging, room management, reactions, files, and polls.</p><div class="help-shortcuts"><span>Find a conversation <kbd>Ctrl / ⌘ K</kbd></span><span>Send a message <kbd>Enter</kbd></span><span>New line <kbd>Shift Enter</kbd></span></div><p class="form-note">Early development: QR code display, threads, background push, and full Element X parity remain on the roadmap.</p><Button variant="solid" theme="green" @click="open('login')">Connect your account <ArrowUpRight :size="15"/></Button></div>
   </Dialog>

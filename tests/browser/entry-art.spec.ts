@@ -12,7 +12,7 @@ for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }
     expect(Math.abs(content!.x + content!.width / 2 - viewport.width / 2)).toBeLessThan(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(viewport.width)
     const buttons = gate.getByRole('button')
-    await expect(buttons).toHaveCount(3)
+    await expect(buttons).toHaveCount(5)
     for (const button of await buttons.all()) {
       await button.scrollIntoViewIfNeeded()
       const box = await button.boundingBox()
@@ -23,11 +23,15 @@ for (const viewport of [{ width: 360, height: 800 }, { width: 320, height: 568 }
     await gate.evaluate(el => { el.scrollTop = 0 })
     // Signed-out artwork only: never collect account/session screenshots.
     await page.screenshot({ path: testInfo.outputPath('entry-dark.png') })
-    await gate.getByRole('button', { name: 'Connect your account', exact: true }).click()
+    await expect(gate.getByLabel('Username')).toBeVisible()
+    await page.evaluate(async () => {
+      // @ts-expect-error Vite resolves this browser-only source import.
+      const { engine } = await import('/src/store.ts')
+      engine.loginMethods = async () => ({ password: true, sso: false, oidc: false })
+    })
+    await gate.getByRole('button', { name: 'Register', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Add a Matrix account' })
     await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-    await gate.getByRole('button', { name: 'Create an account', exact: true }).click()
     await expect(dialog.getByRole('button', { name: 'Create account', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await gate.getByRole('button', { name: 'Explore the demo', exact: true }).click()
@@ -48,7 +52,7 @@ test('fern pauses behind auth, follows motion preference and removes listeners o
   }))
   expect(timings.every(timing => timing.iterations === '1')).toBe(true)
   expect(Math.max(...timings.map(timing => timing.end))).toBeLessThanOrEqual(3.02)
-  await page.getByRole('button', { name: 'Connect your account', exact: true }).click()
+  await page.getByRole('button', { name: 'Scan QR code to sign in', exact: true }).click()
   await expect(fern).toHaveClass(/is-paused/)
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(fern).not.toHaveClass(/is-paused/)
@@ -80,7 +84,7 @@ test('large text and a keyboard-sized viewport keep every entry action reachable
   await page.addStyleTag({ content: '.welcome-gate h1 { font-size: 58px !important; } .welcome-gate p, .welcome-gate button { font-size: 24px !important; }' })
   const gate = page.locator('.welcome-gate')
   const buttons = gate.getByRole('button')
-  await expect(buttons).toHaveCount(3)
+  await expect(buttons).toHaveCount(5)
   expect(await gate.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
   for (const button of await buttons.all()) {
     await button.scrollIntoViewIfNeeded()

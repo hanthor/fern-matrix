@@ -1,3 +1,4 @@
+import { configureLoginServer } from '../login'
 import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterface, RoomInterface, TimelineInterface, TimelineItemInterface, EventTimelineItem, MediaSourceInterface, SessionVerificationControllerInterface, SessionVerificationRequestDetails, RoomListEntriesWithDynamicAdaptersResultInterface, RoomDescription, ShieldState, SsoHandlerInterface, GrantQrLoginProgressListener, QrLoginProgressListener } from './generated/matrix_sdk_ffi'
 import type { OAuthAuthorizationDataInterface } from './generated/matrix_sdk'
 import type { Account, Room, Message, Member, DirectoryRoom, SpaceChild } from '../types'
@@ -334,11 +335,11 @@ export class MatrixEngine {
     const discovering = await this.builder(data, false)
     return discovering.slidingSyncVersionBuilder(sdk.SlidingSyncVersionBuilder.Native)
   }
-  async login(server: string, username: string, password: string, forceNativeSync = false) {
+  async login(server: string, username: string, password: string, forceNativeSync = false, logicalServer = false) {
     const sdk = await loadSdk()
     const passphrase = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
     const data: SavedAccount = { storeId: crypto.randomUUID(), passphrase }
-    const client = await (forceNativeSync ? await this.nativeBuilder(data) : await this.builder(data, true)).serverNameOrHomeserverUrl(server).build()
+    const client = await configureLoginServer(forceNativeSync ? await this.nativeBuilder(data) : await this.builder(data, true), server, logicalServer).build()
     await client.login(username, password, 'Fern', undefined)
     if (client.slidingSyncVersion() !== sdk.SlidingSyncVersion.Native) {
       await client.logout()
@@ -357,11 +358,11 @@ export class MatrixEngine {
   // in a popup; the IdP redirects to redirectUri (a static callback page that
   // forwards the callback URL to this window) and the caller completes the
   // flow with finishOidcLogin. Throws before persisting anything.
-  async startOidcLogin(server: string, redirectUri: string, staticRegistrations?: Map<string, string>, forceNativeSync = false): Promise<{ flowId: string; url: string }> {
+  async startOidcLogin(server: string, redirectUri: string, staticRegistrations?: Map<string, string>, forceNativeSync = false, logicalServer = false): Promise<{ flowId: string; url: string }> {
     const sdk = await loadSdk()
     const passphrase = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
     const data: SavedAccount = { storeId: crypto.randomUUID(), passphrase }
-    const client = await (forceNativeSync ? await this.nativeBuilder(data) : await this.builder(data, true)).serverNameOrHomeserverUrl(server).build()
+    const client = await configureLoginServer(forceNativeSync ? await this.nativeBuilder(data) : await this.builder(data, true), server, logicalServer).build()
     try {
       const auth = await client.urlForOidc(sdk.OidcConfiguration.new({
         clientName: 'Fern', redirectUri, clientUri: server,
@@ -421,11 +422,11 @@ export class MatrixEngine {
   }
   // Fresh device scans an existing device's code and signs in. The server
   // defaults to the code's homeserver hint when the code carries one.
-  async loginQrLogin(server: string, bytes: Uint8Array, redirectUri: string, onProgress: (state: QrProgress) => void, signal?: AbortSignal): Promise<string> {
+  async loginQrLogin(server: string, bytes: Uint8Array, redirectUri: string, onProgress: (state: QrProgress) => void, signal?: AbortSignal, logicalServer = false): Promise<string> {
     const sdk = await loadSdk()
     const passphrase = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
     const data: SavedAccount = { storeId: crypto.randomUUID(), passphrase }
-    const client = await (await this.builder(data, true)).serverNameOrHomeserverUrl(server).build()
+    const client = await configureLoginServer(await this.builder(data, true), server, logicalServer).build()
     try {
       const qr = sdk.QrCodeData.fromBytes(exactBytes(bytes))
       const handler = client.newLoginWithQrCodeHandler(sdk.OidcConfiguration.new({
@@ -447,11 +448,11 @@ export class MatrixEngine {
   // with an OIDC provider configured). Same popup contract as OIDC; the
   // handler completes the wrapped client, which is then attached normally.
   private ssoFlows = new Map<string, { client: ClientInterface; handler: SsoHandlerInterface; data: SavedAccount; redirectUri: string }>()
-  async startSsoLogin(server: string, redirectUri: string): Promise<{ flowId: string; url: string }> {
+  async startSsoLogin(server: string, redirectUri: string, logicalServer = false): Promise<{ flowId: string; url: string }> {
     await loadSdk()
     const passphrase = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
     const data: SavedAccount = { storeId: crypto.randomUUID(), passphrase }
-    const client = await (await this.builder(data, true)).serverNameOrHomeserverUrl(server).build()
+    const client = await configureLoginServer(await this.builder(data, true), server, logicalServer).build()
     try {
       const handler = await client.startSsoLogin(redirectUri, undefined)
       const flowId = crypto.randomUUID()
@@ -485,11 +486,11 @@ export class MatrixEngine {
   // Discovers which login flows a homeserver offers, without creating a
   // session or touching disk (in-memory store). Drives the login UI: SSO is
   // offered only when the server supports it.
-  async loginMethods(server: string): Promise<{ password: boolean; sso: boolean; oidc: boolean }> {
+  async loginMethods(server: string, logicalServer = false): Promise<{ password: boolean; sso: boolean; oidc: boolean; homeserverUrl?: string }> {
     const sdk = await loadSdk()
-    const client = await (await new sdk.ClientBuilder().inMemoryStore()).serverNameOrHomeserverUrl(server).build()
+    const client = await configureLoginServer(await new sdk.ClientBuilder().inMemoryStore(), server, logicalServer).build()
     const details = await client.homeserverLoginDetails()
-    return { password: details.supportsPasswordLogin(), sso: details.supportsSsoLogin(), oidc: details.supportsOidcLogin() }
+    return { password: details.supportsPasswordLogin(), sso: details.supportsSsoLogin(), oidc: details.supportsOidcLogin(), homeserverUrl: client.homeserver() }
   }
   /** Re-prime the secrets cache (post-unlock): reads decrypt with the live key. */
   async warmSecrets(): Promise<void> {

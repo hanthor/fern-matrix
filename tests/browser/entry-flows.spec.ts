@@ -1,15 +1,31 @@
 import { test, expect } from '@playwright/test'
 
-test('Create an account opens registration, and reopening sign-in resets it deliberately', async ({ page }) => {
+test('Register opens registration, and returning to inline sign-in resets it deliberately', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
   await page.goto('/?demo=0')
-  await page.getByRole('button', { name: 'Create an account', exact: true }).click()
+  await page.evaluate(async () => {
+    // @ts-expect-error Vite resolves this browser-only source import.
+    const { engine } = await import('/src/store.ts')
+    engine.loginMethods = async () => ({ password: true, sso: false, oidc: false })
+  })
+  await page.getByRole('button', { name: 'Register', exact: true }).click()
+  // Keep failures actionable without collecting traces or credential-bearing DOM.
+  await expect.poll(async () => ({
+    errors,
+    error: await page.evaluate(async () => {
+      // @ts-expect-error Vite resolves this browser-only source import.
+      const { state } = await import('/src/store.ts')
+      return state.error
+    }),
+    registrationVisible: await page.getByRole('button', { name: 'Create account', exact: true }).isVisible(),
+  })).toEqual({ errors: [], error: '', registrationVisible: true })
   const dialog = page.getByRole('dialog', { name: 'Add a Matrix account' })
   await expect(dialog.getByRole('button', { name: 'Create account', exact: true })).toBeVisible()
   await expect(dialog.getByText('Fern checks availability first', { exact: false })).toBeVisible()
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(dialog).not.toBeVisible()
-  await page.getByRole('button', { name: 'Connect your account', exact: true }).click()
-  await expect(dialog.getByRole('button', { name: 'Connect account', exact: true })).toBeVisible()
+  await expect(page.locator('.gate-login').getByRole('button', { name: 'Connect account', exact: true })).toBeVisible()
 })
 
 test('explicit tour permits SSO discovery without an existing real account', async ({ page }) => {
