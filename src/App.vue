@@ -4,6 +4,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FrappeUIProvider, ToastProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
 import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert } from 'lucide-vue-next'
 import UserAvatar from './components/UserAvatar.vue'
+import FernFractal from './components/FernFractal.vue'
 import { saveSessionDraft, readSessionDraft, isSessionRemoving } from './session-storage'
 import SessionExitDialog from './components/SessionExitDialog.vue'
 import { createSessionExit, canResetRecovery, type SessionExitMode } from './session-exit'
@@ -1164,7 +1165,19 @@ onUnmounted(() => { stopReadVisibility(); closeThread(); sessionExit.dispose(); 
   </section>
   <div class="app-shell" :class="{ 'mobile-conversation': state.mobileRoom, 'with-details': state.details }">
     <template v-if="!state.accounts.length">
-      <div class="welcome-gate"><span class="welcome-logo"><Leaf :size="44"/></span><span class="eyebrow">FERN · MATRIX</span><h1>{{ t('gate.title') }}</h1><p>{{ t('gate.subtitle') }}</p><div class="gate-actions"><Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button><Button variant="outline" @click="open('login', 'register')">{{ t('login.createAccount') }}</Button><Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button></div></div>
+      <main class="welcome-gate" aria-labelledby="gate-title">
+        <div class="gate-content">
+          <FernFractal :paused="Boolean(modal) || appLocked"/>
+          <span class="eyebrow">FERN · MATRIX</span>
+          <h1 id="gate-title">{{ t('gate.title') }}</h1>
+          <p>{{ t('gate.subtitle') }}</p>
+          <div class="gate-actions">
+            <Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button>
+            <Button variant="outline" @click="open('login', 'register')">{{ t('login.createAccount') }}</Button>
+            <Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button>
+          </div>
+        </div>
+      </main>
     </template>
     <template v-else>
     <nav class="account-rail" :aria-label="t('nav.accountsSpaces')">
