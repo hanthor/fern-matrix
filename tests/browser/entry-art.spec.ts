@@ -164,7 +164,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
     await page.keyboard.press('Tab')
     await expect(gate.getByLabel('Username')).toBeFocused()
     await page.keyboard.press('Tab')
-    await expect(gate.getByLabel('Password', { exact: true })).toBeFocused()
+    await expect(gate.getByLabel(/^Password\s*\*?\s*\(required\)$/)).toBeFocused()
     await page.keyboard.press('Tab')
     await expect(gate.getByRole('button', { name: 'Connect account', exact: true })).toBeFocused()
     // Form text has a 96% page-color backing; verify conservative contrast
