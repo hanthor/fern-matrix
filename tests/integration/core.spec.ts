@@ -4,9 +4,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { MatrixEngine } from '../../src/sdk/engine'
 import type { Account, Room, Message } from '../../src/types'
+import { backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse } from './fixture-contract'
 
 interface FixtureUser { username: string; password: string; userId: string; token: string }
-interface Fixture { base: string; version: string; users: FixtureUser[] }
+interface Fixture { base: string; version: string; users: FixtureUser[]; scenarioUsers?: { backupMigration?: FixtureUser } }
 declare global {
   interface Window {
     directoryTestIds: string[]
@@ -97,16 +98,19 @@ async function matrix(request: APIRequestContext, user: FixtureUser, method: str
   const response = await request.fetch(fixture.base + '/_matrix/client/v3' + path, {
     method, headers: { Authorization: 'Bearer ' + user.token }, data,
   })
-  // Report status/path, never headers, credentials or full response bodies.
-  expect(response.status(), method + ' ' + path).toBeLessThan(300)
-  return response.json()
+  const body: unknown = await matrixResponseBody(response.status(), () => response.json())
+  // Only a fixed operation label, status and allowlisted Matrix error code.
+  // Do not expose paths, response messages, headers or credentials.
+  expect(response.status(), matrixFailureSummary('client-api', response.status(), body)).toBeLessThan(300)
+  return body as any
 }
 async function admin(request: APIRequestContext, method: string, path: string, data?: unknown) {
   const response = await request.fetch(fixture.base + '/_synapse/admin' + path, {
     method, headers: { Authorization: 'Bearer ' + adminUser.token }, data,
   })
-  expect(response.status(), method + ' ' + path).toBeLessThan(300)
-  return response.json()
+  const body: unknown = await matrixResponseBody(response.status(), () => response.json())
+  expect(response.status(), matrixFailureSummary('admin-api', response.status(), body)).toBeLessThan(300)
+  return body as any
 }
 async function watch(page: Page, accountId: string, roomId: string) {
   await expect.poll(() => page.evaluate(({ accountId, roomId }) =>
@@ -1160,6 +1164,15 @@ test('cross-user rotated-out sessions stay missing on request', async ({ browser
 
 test('backup migration moves a fresh device to the rotated key', async ({ browser, request }) => {
   test.setTimeout(180_000)
+  // Server-side backup state survives browser-context disposal. This account
+  // is not shared with earlier recovery or device-verification scenarios.
+  const user = backupMigrationUser(fixture)
+  const backup = await request.get(fixture.base + '/_matrix/client/v3/room_keys/version', {
+    headers: { Authorization: 'Bearer ' + user.token },
+  })
+  const backupBody: unknown = await backup.json().catch(() => null)
+  expect(backup.status(), matrixFailureSummary('backup-precondition', backup.status(), backupBody)).toBe(404)
+  expect(missingBackupResponse(backup.status(), backupBody), 'Expected an absent backup for the isolated fixture user').toBe(true)
   const ca = await browser.newContext()
   const cb = await browser.newContext()
   const pa = await ca.newPage()
@@ -1167,7 +1180,7 @@ test('backup migration moves a fresh device to the rotated key', async ({ browse
   try {
     await boot(pa)
     await boot(pb)
-    const a = await login(pa, alice)
+    const a = await login(pa, user)
     const roomId = await pa.evaluate(({ a }) =>
       window.matrixTest.engine.createRoom(a, 'Migration fixture', 'backup rotation'), { a })
     await watch(pa, a, roomId)
@@ -1181,7 +1194,7 @@ test('backup migration moves a fresh device to the rotated key', async ({ browse
     await findMessage(pa, a, roomId, 'After rotation')
     const newKey = await pa.evaluate(({ a }) => window.matrixTest.engine.resetRecovery(a), { a })
     expect(newKey).not.toBe(oldKey)
-    const b = await login(pb, alice)
+    const b = await login(pb, user)
     await watch(pb, b, roomId)
     // The superseded key no longer opens the replaced backup.
     const stale = await pb.evaluate(async ({ b, oldKey }) => {

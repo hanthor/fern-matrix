@@ -1,6 +1,6 @@
 # Live Matrix integration
 
-The live suite starts an actual **Synapse 1.161.0**, verifies native sliding-sync discovery, registers three disposable users, and exercises Fern's actual Rust WASM in isolated Chromium contexts. The third user operates through the Matrix HTTP client API as a reference for server state. It is not an independent E2EE implementation; encrypted interoperability with Element X remains #6.
+The live suite starts an actual **Synapse 1.161.0**, verifies native sliding-sync discovery, registers disposable shared users plus a dedicated backup-migration user, and exercises Fern's actual Rust WASM in isolated Chromium contexts. The third user operates through the Matrix HTTP client API as a reference for server state. It is not an independent E2EE implementation; encrypted interoperability with Element X remains #6.
 
 ## Run locally
 
@@ -18,7 +18,11 @@ Alternatively, use `uv venv .cache/fern-synapse --python 3.12` and `uv pip sync 
 
 The runner creates a temporary fixture directory and terminates Synapse after success, failure or interruption. Its temporary database, media, signing key and accounts are removed. Passwords and admin registration secrets are random per run; credentials are written to a mode-0600 temporary file, never stdout or command-line arguments. Registration is disabled except through the internal shared-secret fixture setup, federation is disallowed, and usage statistics are off.
 
-Do not serve this fixture on a public interface or reuse it for personal accounts. Browser test contexts are discarded after each test.
+Do not serve this fixture on a public interface or reuse it for personal accounts. Browser test contexts are discarded after each test, but that does not reset server-side account state. The backup-migration scenario owns a separate user, verifies that no backup exists before setup, and retains all real recovery-key rotation and history assertions. Earlier recovery tests cannot seed its backup. SAS verification scenarios still need separate isolation and trusted-device qualification; this change does not declare them fixed.
+
+The loopback-only fixture uses finite, elevated room-creation, join and invitation limits matching its message/login workload limits. This prevents unrelated scenarios from exhausting shared-user quotas; it does not change production settings or prove client rate-limit handling. The pinned Synapse configuration remains part of live validation. Core direct-HTTP assertion diagnostics expose only a fixed operation label, HTTP status and allowlisted Matrix error code, never response text, URLs, credentials, recovery keys or message content. SDK errors remain governed by their existing adapter error paths.
+
+The OIDC job builds the pinned Spindle revision from inside its checkout, so rustup discovers upstream's `rust-toolchain.toml` (Rust 1.90.0 for revision `fd256b00c56ebf41459c579358c22f05ce3eed61`). Using `--manifest-path` from the Fern root does not select that nested toolchain. CI prints the selected compiler and Cargo versions and uses `--locked` for upstream's committed dependency graph. This addresses a pre-test build failure after runner toolchain drift (`AtomicU64::fetch_update` deprecation under upstream's deny-warnings policy); warnings remain enforced. A successful build still requires separate validation of the actual OIDC flows.
 
 ## SSO round trip
 
