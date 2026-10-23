@@ -29,7 +29,7 @@ jobs:
             https://api.github.com/repos/hanthor/fern-matrix/actions/artifacts/12475828055/zip
           unset GH_TOKEN
           python3 - <<'PY'
-          import base64, hashlib, io, os, re, struct, zipfile
+          import base64, hashlib, io, json, os, re, struct, zipfile
           from pathlib import Path
           archive = Path(os.environ["ARCHIVE"]).read_bytes()
           if len(archive) != 152129 or hashlib.sha256(archive).hexdigest() != "6fd6c3974bd735ba965c95a93761c93e108144aa1c72909cb1d74a12ef7d22d7":
@@ -40,6 +40,9 @@ jobs:
               members = bundle.infolist()
               if len(members) != 3:
                   raise SystemExit("Expected exactly three signed-out screenshots")
+              if any(len(entry.filename) > 240 for entry in members):
+                  raise SystemExit("Artifact member name exceeds bound")
+              print("FERN_ARTIFACT_MEMBERS " + json.dumps([entry.filename for entry in members], ensure_ascii=True))
               for entry in members:
                   if not re.fullmatch(r"entry-art-entry-stays-[a-zA-Z0-9_-]+/entry-dark\.png", entry.filename):
                       raise SystemExit("Unexpected artifact member")
