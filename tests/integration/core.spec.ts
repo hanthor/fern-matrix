@@ -317,27 +317,42 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
     const loginVia = async (page: Page, user: FixtureUser) => page.evaluate(({ base, username, password }) =>
       window.matrixTest.engine.login(base, username, password),
     { base: viaProxy, username: user.username, password: user.password })
-    // Synapse advertises its direct public_baseurl in the login response.
-    // Keep this client's discovery on the disposable proxy; otherwise the SDK
-    // correctly follows well_known and silently bypasses the blackout.
-    const proxyLogin = (url: URL) => url.origin === viaProxy && /^\/_matrix\/client\/(?:v3|r0)\/login$/.test(url.pathname)
-    await pa.route(proxyLogin, async route => {
-      if (route.request().method() !== 'POST') return route.continue()
+    // Both pre-login discovery and the login response advertise Synapse's
+    // direct public_baseurl. Keep both on this disposable proxy, otherwise
+    // the SDK correctly follows discovery and silently bypasses the blackout.
+    const loginPath = /^\/_matrix\/client\/(?:v3|r0)\/login$/
+    const discoveryPath = '/.well-known/matrix/client'
+    const proxyDiscovery = (url: URL) => url.origin === viaProxy
+      && (url.pathname === discoveryPath || loginPath.test(url.pathname))
+    const rewritten = { discovery: 0, login: 0 }
+    await pa.route(proxyDiscovery, async route => {
+      const path = new URL(route.request().url()).pathname
+      const discovery = path === discoveryPath && route.request().method() === 'GET'
+      const login = loginPath.test(path) && route.request().method() === 'POST'
+      if (!discovery && !login) return route.continue()
       const response = await route.fetch()
       if (!response.ok()) return route.fulfill({ response })
-      const login = await response.json()
-      login.well_known = {
-        ...login.well_known,
-        'm.homeserver': { ...login.well_known?.['m.homeserver'], base_url: viaProxy },
+      const body = await response.json()
+      if (discovery) {
+        body['m.homeserver'] = { ...body['m.homeserver'], base_url: viaProxy }
+        rewritten.discovery++
+      } else {
+        body.well_known = {
+          ...body.well_known,
+          'm.homeserver': { ...body.well_known?.['m.homeserver'], base_url: viaProxy },
+        }
+        rewritten.login++
       }
       const headers = response.headers()
       // The response body changed; let Playwright compute its new length.
       delete headers['content-length']
       delete headers['content-encoding']
-      await route.fulfill({ response, headers, json: login })
+      await route.fulfill({ response, headers, json: body })
     })
     const a = await loginVia(pa, alice)
-    await pa.unroute(proxyLogin)
+    await pa.unroute(proxyDiscovery)
+    expect(rewritten.discovery).toBeGreaterThan(0)
+    expect(rewritten.login).toBeGreaterThan(0)
     expect(await pa.evaluate(a => {
       const record = JSON.parse(localStorage.getItem('fern.sessions.v1') ?? '{}')[a]
       return record?.homeserverUrl ? new URL(record.homeserverUrl).origin : null
