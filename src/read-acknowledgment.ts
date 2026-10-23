@@ -1,51 +1,91 @@
-export interface ReadTarget { accountId: string; roomId: string; eventId: string; generation: number }
-const roomKey = (target: ReadTarget) => JSON.stringify([target.accountId, target.roomId])
-const visitKey = (target: ReadTarget) => JSON.stringify([target.generation, target.eventId])
-const same = (a?: ReadTarget, b?: ReadTarget) => a === b || Boolean(a && b && roomKey(a) === roomKey(b) && visitKey(a) === visitKey(b))
+export interface ReadTarget { accountId: string; roomId: string; rootId?: string; eventId: string; generation: number }
+const roomKey = (target: ReadTarget) => JSON.stringify([target.accountId, target.roomId, target.rootId ?? ''])
+const eventKey = (target: ReadTarget) => JSON.stringify([roomKey(target), target.eventId])
+const same = (a?: ReadTarget, b?: ReadTarget) => a === b || Boolean(a && b && eventKey(a) === eventKey(b) && a.generation === b.generation)
+type Visit = { generation: number; events: Set<string> }
+type PendingRead = { target: ReadTarget; controller: AbortController; visit: Visit }
 
-// Geometry observers may report the same target many times. One attempt per
-// recent event/visit bounds both failures and cancellations; explicit room reopening
-// permits retry. Successful receipts remain deduplicated across visits.
+// Network acknowledgment and its application to the currently visible view
+// have different lifetimes. Pending event leases survive navigation until the
+// outcome is known, preventing same-event overlap across visits.
 export class VisibleReadAcknowledger {
   private current?: ReadTarget
-  private pending?: { target: ReadTarget; controller: AbortController }
-  private succeeded = new Map<string, string>()
-  private attempted = new Map<string, { generation: number; events: Set<string>; latestEvent: string }>()
+  private pending = new Map<string, PendingRead>()
+  private succeeded = new Map<string, Set<string>>()
+  private attempted = new Map<string, Visit>()
   constructor(
     private send: (target: ReadTarget, signal: AbortSignal) => Promise<boolean>,
     private success: (target: ReadTarget) => void,
     private failure: (target: ReadTarget, error: unknown) => void,
   ) {}
   update(target?: ReadTarget) {
-    if (same(this.current, target)) return
     this.current = target
-    this.pending?.controller.abort()
-    if (!target) return
-    const key = roomKey(target)
+    for (const request of this.pending.values()) {
+      if (!same(request.target, target)) request.controller.abort()
+    }
+    if (target) this.attempt(target)
+  }
+  private attempt(target: ReadTarget) {
+    const key = roomKey(target), event = eventKey(target)
+    if (this.succeeded.get(key)?.has(target.eventId)) {
+      // Fresh geometry may reveal an acknowledged target again or add older
+      // loaded content. Refresh owned local state, never resend the receipt.
+      this.success(target)
+      return
+    }
+    // An aborted request may still have reached the server. Do not dispatch
+    // this event again in any visit until that request has actually settled.
+    if (this.pending.has(event)) return
     let visit = this.attempted.get(key)
     if (!visit || visit.generation !== target.generation) {
-      visit = { generation: target.generation, events: new Set(), latestEvent: '' }
+      visit = { generation: target.generation, events: new Set() }
       this.attempted.set(key, visit)
     }
-    if (this.succeeded.get(key) === target.eventId || visit.events.has(target.eventId)) return
-    visit.events.add(target.eventId)
-    // Bound memory without letting ordinary A → B → A snapshot changes retry A.
-    if (visit.events.size > 256) visit.events.delete(visit.events.values().next().value!)
-    visit.latestEvent = target.eventId
-    const request = { target, controller: new AbortController() }
-    this.pending = request
+    if (visit.events.has(target.eventId)) return
+    this.remember(visit.events, target.eventId)
+    const request: PendingRead = { target, controller: new AbortController(), visit }
+    this.pending.set(event, request)
     void this.send(target, request.controller.signal).then(sent => {
-      // A completed dispatch is still deduplicated if navigation changed while
-      // it was in flight, but it must never update the new view's counters.
-      if (sent && this.attempted.get(key) === visit && visit.latestEvent === target.eventId) this.succeeded.set(key, target.eventId)
-      if (sent && !request.controller.signal.aborted && same(this.current, target)) this.success(target)
-    }).catch(error => {
+      // Account removal deletes the lease; an old completion must not
+      // repopulate bookkeeping for a removed or replacement session.
+      if (this.pending.get(event) !== request) return
+      this.pending.delete(event)
+      if (sent) {
+        let events = this.succeeded.get(key)
+        if (!events) { events = new Set(); this.succeeded.set(key, events) }
+        this.remember(events, target.eventId)
+        const visible = this.current
+        if (visible && eventKey(visible) === event) this.success(visible)
+        return
+      }
+      // Only a canceled, definitely-unsent false result releases a same-visit
+      // attempt. Unknown failures remain latched until explicit reopening.
+      if (request.controller.signal.aborted && this.attempted.get(key) === visit) visit.events.delete(target.eventId)
+      this.resumeCurrent(event, request)
+    }, error => {
+      if (this.pending.get(event) !== request) return
+      this.pending.delete(event)
       if (!request.controller.signal.aborted && same(this.current, target)) this.failure(target, error)
-    }).finally(() => { if (this.pending === request) this.pending = undefined })
+      // A different generation is an explicit reopen, not an observer retry.
+      // It may retry an unknown outcome only after the old request settled.
+      if (this.current && this.current.generation !== target.generation) this.resumeCurrent(event, request)
+    })
+  }
+  private resumeCurrent(event: string, request: PendingRead) {
+    const visible = this.current
+    if (!visible || eventKey(visible) !== event) return
+    if (request.controller.signal.aborted || visible.generation !== request.target.generation) this.attempt(visible)
+  }
+  private remember(events: Set<string>, eventId: string) {
+    events.add(eventId)
+    if (events.size > 256) events.delete(events.values().next().value!)
   }
   clear() { this.update() }
   forgetAccount(accountId: string) {
     if (this.current?.accountId === accountId) this.clear()
+    for (const [key, request] of this.pending) if (request.target.accountId === accountId) {
+      request.controller.abort(); this.pending.delete(key)
+    }
     for (const key of this.attempted.keys()) if (JSON.parse(key)[0] === accountId) this.attempted.delete(key)
     for (const key of this.succeeded.keys()) if (JSON.parse(key)[0] === accountId) this.succeeded.delete(key)
   }

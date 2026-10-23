@@ -1042,6 +1042,20 @@ export class MatrixEngine {
     if (replyId) await timeline.sendReply(content, replyId)
     else await timeline.send(content)
   }
+  // Receipt preparation must not create a thread timeline or outlive cleanup.
+  async markThreadEventRead(accountId: string, roomId: string, rootId: string, eventId: string, signal: AbortSignal): Promise<boolean> {
+    const key = `${accountId}/${roomId}/${rootId}`
+    const timeline = this.threadTimelines.get(key)
+    const event = this.eventCache.get(`${accountId}/${roomId}/${eventId}`)
+    if (!this.alive || isRemovingSession(accountId) || !timeline || signal.aborted
+      || event?.eventOrTransactionId.tag !== 'EventId' || event.eventOrTransactionId.inner.eventId !== eventId
+      || event.localSendState?.tag === 'NotSentYet' || event.localSendState?.tag === 'SendingFailed'
+      || event.content.tag !== 'MsgLike' || event.content.inner.content.threadRoot !== rootId) return false
+    const sdk = await loadSdk()
+    if (!this.alive || isRemovingSession(accountId) || signal.aborted || this.threadTimelines.get(key) !== timeline) return false
+    await timeline.sendReadReceipt(sdk.ReceiptType.Read, eventId, { signal })
+    return true
+  }
   async markThreadRead(accountId: string, roomId: string, rootId: string, eventId: string) {
     const sdk = await loadSdk()
     await (await this.threadTimeline(accountId, roomId, rootId)).sendReadReceipt(sdk.ReceiptType.Read, eventId)

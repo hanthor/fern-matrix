@@ -71,7 +71,11 @@ export const state = reactive({
   firstUnread: {} as Record<string, { id: string; count: number }>,
   avatars: {} as Record<string, string>, uploading: false,
   thread: undefined as { accountId: string; roomId: string; rootId: string; root: Message | undefined; messages: Message[]; end: boolean; loading: boolean } | undefined,
+  // Local acknowledged boundary, not a server unread count.
   threadSeen: {} as Record<string, number>,
+  threadReadBoundary: {} as Record<string, string>,
+  threadKnownEvents: {} as Record<string, string[]>,
+  threadAcknowledgedEvents: {} as Record<string, string[]>,
 })
 const avatarInflight = new Map<string, Promise<string | undefined>>()
 export function avatarKey(accountId: string, userId: string) { return `${accountId}/avatar/${userId}` }
@@ -129,69 +133,148 @@ export function downloadDiagnostics() {
   setTimeout(() => URL.revokeObjectURL(link.href), 60_000)
 }
 export const threadKey = (accountId: string, roomId: string, rootId: string) => `${accountId}/${roomId}/${rootId}`
-export function threadUnread(accountId: string, roomId: string, rootId: string, total: number) {
-  return Math.max(0, total - (state.threadSeen[threadKey(accountId, roomId, rootId)] ?? 0))
+export function threadUnread(accountId: string, roomId: string, rootId: string, _total: number): number | undefined {
+  const key = threadKey(accountId, roomId, rootId)
+  const known = state.threadKnownEvents[key]
+  const boundary = state.threadReadBoundary[key]
+  // The root's total replies is not an unread count. Without a known local
+  // receipt boundary, a live thread's unread status is unknown, not "all new".
+  if (!boundary) return isDemoAccount(accountId) ? known?.length : undefined
+  const index = known?.indexOf(boundary) ?? -1
+  return index >= 0 ? known!.length - index - 1 : undefined
 }
 let stopThread: (() => void) | undefined
-const threadMarked = new Set<string>()
+let threadGeneration = 0
+export const threadReadReady = ref(false)
+function ownsThread(view: NonNullable<typeof state.thread>, generation: number) {
+  return generation === threadGeneration && state.thread === view && !appLocked.value
+    && state.activeAccountId === view.accountId && state.activeRoomId === view.roomId
+}
+function confirmedThreadReplies(view: NonNullable<typeof state.thread>) {
+  return view.messages.filter(value => value.threadRoot === view.rootId && !value.status
+    && (isDemoAccount(view.accountId) || value.id.startsWith('$')))
+}
+function rememberThreadSnapshot(view: NonNullable<typeof state.thread>) {
+  const key = threadKey(view.accountId, view.roomId, view.rootId)
+  const events = confirmedThreadReplies(view).map(value => value.id)
+  state.threadKnownEvents[key] = events
+  const acknowledged = new Set(state.threadAcknowledgedEvents[key] ?? [])
+  let index = -1
+  for (let position = 0; position < events.length; ++position) if (acknowledged.has(events[position])) index = position
+  if (index >= 0) {
+    state.threadReadBoundary[key] = events[index]
+    state.threadSeen[key] = index + 1
+  }
+}
+const threadReads = new VisibleReadAcknowledger(
+  async (target, signal) => {
+    const view = state.thread
+    if (!view || !ownsThread(view, target.generation) || view.rootId !== target.rootId || !threadReadReady.value
+      || !state.details || signal.aborted) return false
+    if (isDemoAccount(target.accountId)) return true
+    return engine.markThreadEventRead(target.accountId, target.roomId, view.rootId, target.eventId, signal)
+  },
+  target => {
+    const view = state.thread
+    if (!view || !ownsThread(view, target.generation) || view.rootId !== target.rootId || !state.details) return
+    const replies = confirmedThreadReplies(view)
+    if (replies.at(-1)?.id !== target.eventId) return
+    const key = threadKey(view.accountId, view.roomId, view.rootId)
+    const acknowledged = state.threadAcknowledgedEvents[key] ??= []
+    if (!acknowledged.includes(target.eventId)) acknowledged.push(target.eventId)
+    if (acknowledged.length > 256) acknowledged.shift()
+    rememberThreadSnapshot(view)
+  },
+  target => {
+    const view = state.thread
+    if (view && ownsThread(view, target.generation) && view.rootId === target.rootId)
+      state.error = 'Could not send the thread read receipt. Reopen this thread to retry.'
+  },
+)
+export function acknowledgeVisibleThread(eventId?: string) {
+  const view = state.thread
+  const latest = view && confirmedThreadReplies(view).at(-1)
+  if (!view || !eventId || latest?.id !== eventId || !state.details || !threadReadReady.value
+    || !ownsThread(view, threadGeneration)) { threadReads.clear(); return }
+  threadReads.update({ accountId: view.accountId, roomId: view.roomId, rootId: view.rootId, eventId, generation: threadGeneration })
+}
 export function closeThread() {
-  stopThread?.(); stopThread = undefined
-  if (state.thread) for (const key of [...threadMarked]) if (key.startsWith(threadKey(state.thread.accountId, state.thread.roomId, state.thread.rootId))) threadMarked.delete(key)
+  ++threadGeneration
+  const stop = stopThread
+  stopThread = undefined
+  threadReadReady.value = false
+  threadReads.clear()
   state.thread = undefined
+  stop?.()
 }
-function markThreadLatest(view: { accountId: string; roomId: string; rootId: string }, messages: Message[]) {
-  const latest = [...messages].reverse().find(item => item.id.startsWith('$') && !item.own)
-  const marker = threadKey(view.accountId, view.roomId, view.rootId) + '/' + (latest?.id ?? 'none')
-  if (threadMarked.has(marker)) return
-  threadMarked.add(marker)
-  if (latest) void action(() => engine.markThreadRead(view.accountId, view.roomId, view.rootId, latest.id))
-}
-export async function openThread(accountId: string, roomId: string, rootId: string) {
+watch(() => state.details, visible => { if (!visible) threadReads.clear() }, { flush: 'sync' })
+export async function openThread(accountId: string, roomId: string, rootId: string): Promise<boolean> {
   closeThread()
+  if (appLocked.value || accountId !== state.activeAccountId || roomId !== state.activeRoomId) return false
+  const generation = threadGeneration
   const loaded = state.messages[messageKey(accountId, roomId)] ?? []
   const root = loaded.find(item => item.id === rootId)
   state.thread = { accountId, roomId, rootId, root, messages: [], end: false, loading: true }
+  const view = state.thread
   if (isDemoAccount(accountId)) {
-    state.thread.messages = loaded.filter(item => item.id === rootId || item.threadRoot === rootId)
-    state.thread.end = true
-    state.thread.loading = false
-    markThreadSeen(accountId, roomId, rootId, root?.threadReplies ?? state.thread.messages.length)
-    return
+    view.messages = loaded.filter(item => item.id === rootId || item.threadRoot === rootId)
+    rememberThreadSnapshot(view)
+    view.end = true; view.loading = false
+    threadReadReady.value = true
+    return true
   }
+  let subscribed = false, receivedSnapshot = false
   try {
-    stopThread = await engine.watchThread(accountId, roomId, rootId, updated => {
-      if (!state.thread || state.thread.rootId !== rootId) return
-      state.thread.messages = updated
-      state.thread.loading = false
-      markThreadSeen(accountId, roomId, rootId, updated.filter(item => item.threadRoot).length || root?.threadReplies)
-      markThreadLatest({ accountId, roomId, rootId }, updated)
+    const stop = await engine.watchThread(accountId, roomId, rootId, updated => {
+      if (!ownsThread(view, generation)) return
+      view.messages = updated
+      rememberThreadSnapshot(view)
+      view.loading = false
+      receivedSnapshot = true
+      if (subscribed) threadReadReady.value = true
     })
+    if (!ownsThread(view, generation)) { stop(); return false }
+    stopThread = stop
+    subscribed = true
+    threadReadReady.value = receivedSnapshot
+    return true
   } catch (error) {
-    state.thread.loading = false
-    state.error = error instanceof Error ? error.message : String(error)
+    if (ownsThread(view, generation)) {
+      view.loading = false
+      state.error = error instanceof Error ? error.message : String(error)
+    }
+    return false
   }
-}
-function markThreadSeen(accountId: string, roomId: string, rootId: string, total?: number) {
-  if (total !== undefined) state.threadSeen[threadKey(accountId, roomId, rootId)] = total
 }
 export async function threadReply(body: string, replyTo?: string) {
   const view = state.thread
-  if (!view || !body.trim()) return false
+  const generation = threadGeneration
+  if (!view || !body.trim() || !ownsThread(view, generation)) return false
   if (isDemoAccount(view.accountId)) {
     const key = messageKey(view.accountId, view.roomId)
     state.messages[key].push(localMessage(body, { threadRoot: view.rootId }))
     view.messages = state.messages[key].filter(item => item.id === view.rootId || item.threadRoot === view.rootId)
-    markThreadSeen(view.accountId, view.roomId, view.rootId, (view.root?.threadReplies ?? 0) + 1)
+    rememberThreadSnapshot(view)
     return true
   }
-  await action(() => engine.sendThreadReply(view.accountId, view.roomId, view.rootId, body, replyTo))
-  return !state.error
+  try {
+    await engine.sendThreadReply(view.accountId, view.roomId, view.rootId, body, replyTo)
+    return ownsThread(view, generation)
+  } catch (error) {
+    if (ownsThread(view, generation)) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  }
 }
 export async function paginateThread() {
   const view = state.thread
-  if (!view || view.end || isDemoAccount(view.accountId)) return
-  const end = await action(() => engine.paginateThread(view.accountId, view.roomId, view.rootId))
-  if (end) view.end = true
+  const generation = threadGeneration
+  if (!view || view.end || isDemoAccount(view.accountId) || !ownsThread(view, generation)) return
+  try {
+    const end = await engine.paginateThread(view.accountId, view.roomId, view.rootId)
+    if (ownsThread(view, generation) && end) view.end = true
+  } catch (error) {
+    if (ownsThread(view, generation)) state.error = error instanceof Error ? error.message : String(error)
+  }
 }
 export const account = computed(() => state.accounts.find(item => item.id === state.activeAccountId))
 export const room = computed(() => state.rooms.find(item => item.id === state.activeRoomId && item.accountId === state.activeAccountId))
@@ -312,7 +395,7 @@ export function clearFocus() {
   focused.value = undefined
   stop?.()
 }
-function invalidateRoomNavigation() { ++navigationGeneration; clearFocus(); roomReadReady.value = false; readAcknowledgments.clear() }
+function invalidateRoomNavigation() { ++navigationGeneration; clearFocus(); closeThread(); roomReadReady.value = false; readAcknowledgments.clear() }
 watch(() => [state.activeAccountId, state.activeRoomId], invalidateRoomNavigation, { flush: 'sync' })
 export interface PinItem { eventId: string; message?: Message; missing: boolean; canPin: boolean }
 export const pins = ref<PinItem[]>([])
@@ -1255,6 +1338,9 @@ export async function retryPendingCleanup(id: string): Promise<ExitOutcome> {
 }
 function clearAccountState(id: string) {
   readAcknowledgments.forgetAccount(id)
+  threadReads.forgetAccount(id)
+  for (const map of [state.threadSeen, state.threadReadBoundary, state.threadKnownEvents, state.threadAcknowledgedEvents])
+    for (const key of Object.keys(map)) if (key.startsWith(`${id}/`)) delete map[key]
   if (state.thread?.accountId === id) closeThread()
   state.accounts = state.accounts.filter(value => value.id !== id)
   state.rooms = state.rooms.filter(value => value.accountId !== id)
