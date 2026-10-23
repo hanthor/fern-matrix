@@ -117,6 +117,16 @@ describe('actual engine local-cleanup contract', () => {
     expect(records().a).toBeUndefined()
     expect(deleted).toHaveLength(3)
   })
+  it('exposes only allowlisted cleanup stages, never underlying storage errors', async () => {
+    vi.mocked(dropSecrets).mockRejectedValueOnce(new Error('private-secret-or-backend-message'))
+    try { await engine().removeAccount('a'); throw new Error('expected rejection') }
+    catch (error) {
+      expect(error).toBeInstanceOf(LocalCleanupError)
+      expect((error as LocalCleanupError).stages).toEqual(['secret-delete'])
+      expect((error as Error).message).toContain('Incomplete steps: secret-delete')
+      expect((error as Error).message).not.toContain('private-secret-or-backend-message')
+    }
+  })
   it('attempts every database after secret failure and retains retry identity', async () => {
     const sdk = engine()
     vi.mocked(dropSecrets).mockRejectedValueOnce(new Error('keychain unavailable'))

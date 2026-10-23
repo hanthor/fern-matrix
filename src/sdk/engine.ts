@@ -180,9 +180,10 @@ function deleteExitDatabase(name: string): Promise<void> {
     } catch { finish(new Error('Database deletion could not start')) }
   })
 }
+export type CleanupStage = 'tombstone' | 'sync-stop' | 'cancel-handles' | 'detach-verification' | 'secret-write-drain' | 'secret-delete' | 'drafts' | 'media-urls' | 'database-app' | 'database-crypto' | 'database-state' | 'routing'
 export class LocalCleanupError extends Error {
-  constructor(readonly failures: unknown[]) {
-    super('Local cleanup did not finish. The server session may already be revoked or deactivated. Retry removing this session from this device.')
+  constructor(readonly failures: unknown[], readonly stages: CleanupStage[] = []) {
+    super('Local cleanup did not finish. The server session may already be revoked or deactivated. Retry removing this session from this device.' + (stages.length ? ' Incomplete steps: ' + [...new Set(stages)].join(', ') + '.' : ''))
     this.name = 'LocalCleanupError'
   }
 }
@@ -1749,17 +1750,18 @@ export class MatrixEngine {
     // Keep the public routing record until every deletion succeeds. A failed
     // secret or database deletion must remain addressable after retry/reload.
     const failures: unknown[] = []
-    const attempt = async (work: () => unknown | Promise<unknown>) => {
-      try { await work() } catch (error) { failures.push(error) }
+    const stages: CleanupStage[] = []
+    const attempt = async (stage: CleanupStage, work: () => unknown | Promise<unknown>) => {
+      try { await work() } catch (error) { failures.push(error); stages.push(stage) }
     }
     removingSessions.add(accountId)
-    await attempt(() => localStorage.setItem(removalKey(accountId), '1'))
+    await attempt('tombstone', () => localStorage.setItem(removalKey(accountId), '1'))
     this.attachTokens.set(accountId, (this.attachTokens.get(accountId) ?? 0) + 1)
-    await attempt(() => this.syncs.get(accountId)?.stop())
-    for (const handle of this.handles.get(accountId) ?? []) await attempt(() => handle.cancel())
+    await attempt('sync-stop', () => this.syncs.get(accountId)?.stop())
+    for (const handle of this.handles.get(accountId) ?? []) await attempt('cancel-handles', () => handle.cancel())
     const timer = this.timers.get(accountId)
     if (timer) clearTimeout(timer)
-    await attempt(() => this.verificationControllers.get(accountId)?.setDelegate(undefined))
+    await attempt('detach-verification', () => this.verificationControllers.get(accountId)?.setDelegate(undefined))
     this.roomLists.delete(accountId); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
     this.clients.delete(accountId); this.syncs.delete(accountId); this.handles.delete(accountId); this.timers.delete(accountId)
     this.refreshFailures.delete(accountId); this.refreshMarkedOffline.delete(accountId)
@@ -1767,29 +1769,30 @@ export class MatrixEngine {
     // Leave the incremented attachment token invalidating outstanding callbacks.
     // Writes accepted before the tombstone must settle before the final delete.
     let writesSettled = false
-    await attempt(async () => { await drainSessionWrites(accountId); writesSettled = true })
+    await attempt('secret-write-drain', async () => { await drainSessionWrites(accountId); writesSettled = true })
     // Never race the final secret delete against an unresolved keychain write.
     // Independent local cleanup still proceeds; tombstone and routing survive.
-    if (writesSettled) await attempt(() => dropSecrets(accountId, true))
-    await attempt(() => {
+    if (writesSettled) await attempt('secret-delete', () => dropSecrets(accountId, true))
+    await attempt('drafts', () => {
       for (let index = localStorage.length - 1; index >= 0; index--) {
         const key = localStorage.key(index)
         if (key?.startsWith(draftPrefix(accountId))) localStorage.removeItem(key)
       }
     })
     for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) {
-      await attempt(() => URL.revokeObjectURL(url)); this.objectUrls.delete(key)
+      await attempt('media-urls', () => URL.revokeObjectURL(url)); this.objectUrls.delete(key)
     }
     for (const map of [this.timelineCache, this.threadTimelines, this.eventCache, this.media]) for (const key of map.keys()) if (key.startsWith(`${accountId}/`)) map.delete(key)
     // Account IDs are store IDs. Always retry all three, even if a previous
     // attempt erased secrets or the public routing record is already absent.
-    await Promise.all(['', '::matrix-sdk-crypto', '::matrix-sdk-state'].map(suffix =>
-      attempt(() => deleteExitDatabase(`fern-${accountId}${suffix}`))))
-    if (!failures.length) await attempt(() => {
+    await Promise.all(([
+      ['', 'database-app'], ['::matrix-sdk-crypto', 'database-crypto'], ['::matrix-sdk-state', 'database-state'],
+    ] as const).map(([suffix, stage]) => attempt(stage, () => deleteExitDatabase(`fern-${accountId}${suffix}`))))
+    if (!failures.length) await attempt('routing', () => {
       const entries = readSessionRecords(); delete entries[accountId]
       localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
     })
-    if (failures.length) throw new LocalCleanupError(failures)
+    if (failures.length) throw new LocalCleanupError(failures, stages)
   }
   async dispose() {
     this.alive = false

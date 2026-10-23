@@ -32,6 +32,9 @@ jobs:
           .cache/fern-synapse/bin/pip install -r tests/integration/requirements.txt
       - run: npx playwright install --with-deps chromium
       - run: npm test
+      - name: Diagnose session cleanup against the real SDK
+        continue-on-error: true
+        run: npm run test:integration -- --grep "live password login|removing one account|email capability and local removal|authenticated avatars"
       - run: npm run test:e2e
       - run: npm run test:integration
       - run: npm run test:sso
