@@ -55,7 +55,8 @@ test('sign out requires acknowledgement and remains bound to its original sessio
   await dialog.getByRole('button', { name: 'Sign out and erase local data' }).click()
   await expect(dialog).toHaveCount(0)
   expect(await calls(page)).toEqual(['logout:exit-a'])
-  await expect(page.getByText('The server session may still be active.', { exact: false })).toBeVisible()
+  // Frappe renders both a toast and its accessible announcement.
+  await expect(page.getByText('The server session may still be active.', { exact: false }).filter({ visible: true }).first()).toBeVisible()
   expect(await page.evaluate(async () => {
     // @ts-expect-error Vite browser fixture.
     const { state } = await import('/src/store.ts')
