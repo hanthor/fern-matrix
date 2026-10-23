@@ -4,7 +4,7 @@ import { Button, ErrorMessage, LoadingIndicator } from 'frappe-ui'
 import { Camera, QrCode, Upload } from 'lucide-vue-next'
 import { decodeQrFile, scanQrCamera, type QrCamera } from '../qr'
 import { closeQr, openQr, qrFlow, state, submitQrBytes, type QrRole } from '../store'
-const props = defineProps<{ role: QrRole; server?: string }>()
+const props = defineProps<{ role: QrRole; server?: string; redirectUri?: string; logicalServer?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const video = ref<HTMLVideoElement>()
 const fileInput = ref<HTMLInputElement>()
@@ -12,37 +12,52 @@ const camera = ref<QrCamera>()
 const cameraBusy = ref(false)
 const cameraFailed = ref('')
 const scanning = ref(false)
-function stopCamera() { camera.value?.stop(); camera.value = undefined; scanning.value = false }
+let ownedFlow = qrFlow.value
+let disposed = false
+let cameraGeneration = 0
+let cameraAbort: AbortController | undefined
+function stopCamera() { cameraGeneration++; cameraAbort?.abort(); cameraAbort = undefined; cameraBusy.value = false; camera.value?.stop(); camera.value = undefined; scanning.value = false }
 async function startCamera() {
+  if (cameraBusy.value || disposed) return
+  const generation = ++cameraGeneration
+  cameraAbort = new AbortController()
   cameraFailed.value = ''
   cameraBusy.value = true
   try {
     scanning.value = true
-    camera.value = await scanQrCamera(video.value!, bytes => { void submit(bytes) })
+    const started = await scanQrCamera(video.value!, bytes => {
+      if (!disposed && cameraGeneration === generation) void submit(bytes)
+    }, cameraAbort.signal)
+    if (disposed || cameraGeneration !== generation) { started.stop(); return }
+    camera.value = started
   } catch (error) {
+    if (disposed || cameraGeneration !== generation) return
     cameraFailed.value = error instanceof Error ? error.message : String(error)
     scanning.value = false
   }
-  cameraBusy.value = false
+  if (cameraGeneration === generation) cameraBusy.value = false
 }
 async function submit(bytes: Uint8Array) {
+  if (disposed) return
   stopCamera()
-  await submitQrBytes(bytes, props.server)
+  await submitQrBytes(bytes, props.server, props.redirectUri, props.logicalServer)
 }
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
+  const flow = qrFlow.value
   try {
-    await submit(await decodeQrFile(file))
+    const bytes = await decodeQrFile(file)
+    if (!disposed && qrFlow.value === flow) await submit(bytes)
   } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error)
+    if (!disposed && qrFlow.value === flow) state.error = error instanceof Error ? error.message : String(error)
   }
 }
-function retry() { stopCamera(); openQr(props.role) }
-function close() { stopCamera(); closeQr(); emit('close') }
-onUnmounted(stopCamera)
+function retry() { stopCamera(); openQr(props.role); ownedFlow = qrFlow.value }
+function close() { stopCamera(); if (qrFlow.value === ownedFlow) closeQr(); emit('close') }
+onUnmounted(() => { disposed = true; stopCamera(); if (qrFlow.value === ownedFlow) closeQr() })
 </script>
 <template>
   <div v-if="qrFlow" class="qr-view" role="region" :aria-label="qrFlow.role === 'login' ? 'Sign in with QR code' : 'Link a new device'">

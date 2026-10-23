@@ -369,3 +369,18 @@ button > span.truncate.leading-tighter, button > div.h-4 { display: contents; }
 .location-message strong { display: block; font-size: 11px; font-weight: 500; color: var(--text); }
 .location-message small { display: block; margin-top: 4px; font-size: 9px; color: var(--muted); font-weight: 400; }
 .location-message a { font-size: 10px; color: var(--fern); flex: none; }
+
+/* The same auth fields as Add account, without an extra dialog on arrival. */
+.welcome-gate .fern-fractal { width: clamp(84px, 14dvh, 120px); }
+.welcome-gate h1 { margin: 10px 0; }
+.welcome-gate > .gate-content > p { margin-bottom: 18px; }
+.gate-login { width: min(100%, 340px); display: flex; flex-direction: column; gap: 12px; text-align: start; }
+.gate-login input { min-height: 44px; font-size: 16px; }
+.gate-login button { min-height: 44px; height: auto; white-space: normal; }
+.gate-signin-actions { display: flex; align-items: stretch; gap: 10px; }
+.gate-signin-actions > button:first-child { flex: 1; }
+.gate-signin-actions > button:last-child { min-width: 44px; }
+.gate-login .register-link { align-self: center; text-decoration: underline; text-underline-offset: 3px; }
+.gate-login .registration-hint { margin: 0; font-size: 12px; }
+.welcome-gate .gate-actions { margin-top: 12px; }
+.gate-login .login-destination-note { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }

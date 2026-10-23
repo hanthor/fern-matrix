@@ -406,7 +406,16 @@
     "backToSignin": "Zurück zur Anmeldung",
     "createAccount": "Konto erstellen",
     "submitCreate": "Konto erstellen",
-    "submitConnect": "Konto verbinden"
+    "submitConnect": "Konto verbinden",
+    "register": "Registrieren",
+    "scanQr": "QR-Code zum Anmelden scannen",
+    "registerHint": "Neu bei Matrix? Registriere dich, wenn dein Homeserver es erlaubt, oder nutze SSO, falls angeboten.",
+    "passwordUnavailable": "Dieser Homeserver bietet keine Passwort-Anmeldung, SSO oder moderne Anmeldung an.",
+    "fullIdDestination": "Vollständige Matrix-IDs bestimmen ihren Homeserver. Für einen eigenen Endpunkt gib nur den Benutzernamen ein. Anmeldeserver:",
+    "localpartNote": "Wähle nur einen lokalen Benutzernamen, ohne @ oder Homeserver. Die Registrierung nutzt den ausgewählten Homeserver.",
+    "invalidMxid": "Gib einen Benutzernamen oder eine gültige vollständige Matrix-ID ein, etwa @du:example.org.",
+    "invalidServer": "Gib einen gültigen Homeserver-Namen oder einen http(s)-Endpunkt ohne Zugangsdaten, Suchparameter oder Fragment ein.",
+    "registrationLocalpart": "Die Registrierung benötigt einen lokalen Benutzernamen, keine vollständige Matrix-ID. Lass @ und den Homeserver weg."
   },
   "gate": {
     "title": "Gute Gespräche beginnen hier",
