@@ -1,3 +1,4 @@
+import { VisibleReadAcknowledger, type ReadTarget } from './read-acknowledgment'
 import { reactive, computed, watch, ref } from 'vue'
 import { demoAccounts, demoRooms, demoMembers, initialDemoMessages } from './demo'
 import { markdownToHtml } from './format'
@@ -216,6 +217,43 @@ export const focused = ref<{ accountId: string; roomId: string; eventId: string;
 let focusStop: (() => void) | undefined
 let focusGeneration = 0
 let navigationGeneration = 0
+export const roomReadReady = ref(false)
+function ownsReadTarget(target: ReadTarget) {
+  return target.generation === navigationGeneration && target.accountId === state.activeAccountId
+    && target.roomId === state.activeRoomId && !appLocked.value && roomReadReady.value
+    && !focused.value && !state.messageQuery.trim()
+}
+const readAcknowledgments = new VisibleReadAcknowledger(
+  async (target, signal) => {
+    if (!ownsReadTarget(target) || signal.aborted) return false
+    if (isDemoAccount(target.accountId)) return true
+    return engine.markEventRead(target.accountId, target.roomId, target.eventId, signal)
+  },
+  target => {
+    // Live summaries are SDK-authoritative: a newer unseen event may already
+    // have arrived while this receipt was in flight.
+    if (!ownsReadTarget(target) || !isDemoAccount(target.accountId)) return
+    const latest = messages.value.at(-1)
+    if (latest?.id !== target.eventId) return
+    const current = room.value
+    if (current) { current.unread = 0; current.mentions = 0 }
+  },
+  target => {
+    if (ownsReadTarget(target)) state.error = 'Could not send the read receipt. Reopen this room to retry.'
+  },
+)
+export function acknowledgeVisibleRoom(eventId?: string) {
+  const current = room.value
+  const latest = [...messages.value].reverse().find(value => !value.status
+    && (isDemo.value || value.id.startsWith('$')))
+  if (!eventId || !current || current.membership !== 'joined' || latest?.id !== eventId) {
+    readAcknowledgments.clear()
+    return
+  }
+  const target = { accountId: state.activeAccountId, roomId: state.activeRoomId, eventId, generation: navigationGeneration }
+  if (!ownsReadTarget(target)) { readAcknowledgments.clear(); return }
+  readAcknowledgments.update(target)
+}
 // A lease, not a route: delayed UI work must not follow the user into another
 // account/room or survive a leave-and-return to the same view.
 export function captureRoomNavigation() {
@@ -234,6 +272,7 @@ export async function focusMessage(roomId: string, eventId: string): Promise<boo
   const ownsFocus = () => generation === focusGeneration && ownsNavigation()
   // Install before subscribing: the SDK may deliver its initial snapshot before
   // addListener resolves. Never replace that snapshot with an empty array later.
+  readAcknowledgments.clear()
   focused.value = { accountId, roomId, eventId, messages: [] }
   try {
     if (isDemoAccount(accountId)) {
@@ -264,7 +303,7 @@ export function clearFocus() {
   focused.value = undefined
   stop?.()
 }
-function invalidateRoomNavigation() { ++navigationGeneration; clearFocus() }
+function invalidateRoomNavigation() { ++navigationGeneration; clearFocus(); roomReadReady.value = false; readAcknowledgments.clear() }
 watch(() => [state.activeAccountId, state.activeRoomId], invalidateRoomNavigation, { flush: 'sync' })
 export interface PinItem { eventId: string; message?: Message; missing: boolean; canPin: boolean }
 export const pins = ref<PinItem[]>([])
@@ -427,25 +466,30 @@ export async function selectRoom(value: Room): Promise<boolean> {
     state.messages[key] ??= initialDemoMessages(value)
     noteFirstUnread(key, state.messages[key], pendingUnread)
     state.members = structuredClone(demoMembers)
-    value.unread = 0; value.mentions = 0
+    roomReadReady.value = true
     pollModPower.value = false
     return true
   }
   if (value.membership !== 'joined') return false
   state.loading = true
   state.error = ''
+  let receivedSnapshot = false
+  let subscribed = false
   try {
     const stop = await engine.watchRoom(value.accountId, value.id, updated => {
       state.messages[messageKey(value.accountId, value.id)] = updated
       if (pendingUnread > 0 && !state.firstUnread[key]) noteFirstUnread(key, updated, pendingUnread)
       for (const message of updated) void ensureAvatar(value.accountId, message.sender)
-      if (ownsSelection()) state.loading = false
+      if (ownsSelection()) {
+        state.loading = false
+        receivedSnapshot = true
+        if (subscribed) roomReadReady.value = true
+      }
     }, users => { if (ownsSelection()) state.typing = users })
     if (!ownsSelection()) { stop(); return false }
     stopWatching = stop
-    await engine.markRead(value.accountId, value.id)
-    if (!ownsSelection()) return false
-    value.unread = 0; value.mentions = 0
+    subscribed = true
+    roomReadReady.value = receivedSnapshot
     const members = await engine.members(value.accountId, value.id)
     if (!ownsSelection()) return false
     const ignored = isDemoAccount(value.accountId) ? [] : await engine.ignoredUsers(value.accountId)
@@ -1166,6 +1210,7 @@ export async function removeAccount(id: string): Promise<boolean> {
   } finally { exitingAccounts.delete(id) }
 }
 function clearAccountState(id: string) {
+  readAcknowledgments.forgetAccount(id)
   if (state.thread?.accountId === id) closeThread()
   state.accounts = state.accounts.filter(value => value.id !== id)
   state.rooms = state.rooms.filter(value => value.accountId !== id)
@@ -1223,6 +1268,14 @@ export async function unlockApp(pin: string): Promise<boolean> {
   appLocked.value = false
   await engine.warmSecrets()
   await initialize()
+  // Lock invalidated the previous watch's lease. Rearm it without opening a
+  // hidden phone pane; unlocking alone never acknowledges any event.
+  if (room.value) {
+    const mobileRoom = state.mobileRoom
+    const selected = selectRoom(room.value)
+    state.mobileRoom = mobileRoom
+    await selected
+  }
   return true
 }
 export function lockNow() { lockApp(); clearSecretsCache(); appLocked.value = true }
