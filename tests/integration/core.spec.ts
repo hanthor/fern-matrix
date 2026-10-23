@@ -382,10 +382,32 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
         } catch { return true }
       }, viaProxy)).toBe(true)
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Queued while offline'), { a, roomId })
-      // The local echo stays pending while the network is down.
-      await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
-        ?.some(message => message.body === 'Queued while offline' && message.status === 'sending') ?? false,
-      { a, roomId })).toBe(true)
+      // Preserve the pending-state assertion, but expose safe state diagnostics
+      // rather than an opaque false if the real SDK fails or loses the echo.
+      try {
+        await expect.poll(() => pa.evaluate(({ a, roomId }) => (window.matrixTest.messages[a + '/' + roomId] ?? [])
+          .filter(message => message.body === 'Queued while offline')
+          .map(message => message.status ?? 'sent'), { a, roomId })).toContain('sending')
+      } catch (error) {
+        const diagnostic = await pa.evaluate(({ a, roomId }) => {
+          const messages = window.matrixTest.messages[a + '/' + roomId]
+          const echoes = (messages ?? []).filter(message => message.body === 'Queued while offline')
+          return {
+            timelineObserved: messages !== undefined,
+            timelineCount: messages?.length ?? 0,
+            matchingCount: echoes.length,
+            sendingCount: echoes.filter(message => message.status === 'sending').length,
+            failedCount: echoes.filter(message => message.status === 'failed').length,
+            settledCount: echoes.filter(message => message.status === undefined).length,
+            ownCount: echoes.filter(message => message.own).length,
+            identifiedCount: echoes.filter(message => !!message.id).length,
+            engineErrorCount: window.matrixTest.errors.length,
+          }
+        }, { a, roomId })
+        // Counts only: no message text, identifiers, errors, tokens or sessions.
+        console.error('Offline queue state:', JSON.stringify(diagnostic))
+        throw error
+      }
       // A queued echo can be discarded before it ever leaves the device.
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Discarded while offline'), { a, roomId })
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
