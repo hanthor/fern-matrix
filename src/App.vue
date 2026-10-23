@@ -1307,8 +1307,8 @@ onUnmounted(() => { ++authViewGeneration; form.value.password = ''; passwordLogi
   <div class="app-shell" :class="{ 'mobile-conversation': state.mobileRoom, 'with-details': state.details }">
     <template v-if="!state.accounts.length">
       <main class="welcome-gate" aria-labelledby="gate-title">
+        <FernFractal :paused="Boolean(modal) || appLocked"/>
         <div class="gate-content">
-          <FernFractal :paused="Boolean(modal) || appLocked"/>
           <span class="eyebrow">FERN · MATRIX</span>
           <h1 id="gate-title">{{ t('gate.title') }}</h1>
           <p>{{ t('gate.subtitle') }}</p>

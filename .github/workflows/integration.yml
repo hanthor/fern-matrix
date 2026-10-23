@@ -41,7 +41,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: entry-artwork
-          path: test-results/**/entry-dark.png
+          path: test-results/**/entry-*.png
           if-no-files-found: ignore
           retention-days: 7
       - run: npm run test:integration
