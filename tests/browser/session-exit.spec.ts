@@ -155,7 +155,7 @@ test('unfinished cleanup stays explicit and failed cleanup retries locally, neve
   await dialog.getByRole('button', { name: 'Retry local cleanup' }).click()
   await expect(dialog.getByText('Local erasure is not complete.', { exact: false })).toBeVisible()
   expect(await calls(page)).toEqual(['logout:exit-a', 'remove:exit-a'])
-  await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Close', exact: true }).filter({ hasText: 'Close' }).click()
   await expect(page.getByRole('region', { name: 'Local cleanup unfinished' })).toBeVisible()
   expect(await page.evaluate(async () => {
     // @ts-expect-error Vite browser fixture.

@@ -108,7 +108,7 @@ export function createSessionExit(deps: ExitDependencies, timeoutMs = 5000) {
   }
   function applyOutcome(outcome: ExitOutcome): boolean {
     if (outcome.status === 'complete') { close(); return true }
-    if (outcome.status === 'restart-required' || outcome.cleanupStarted) state.outcome = outcome
+    if (outcome.status === 'restart-required' || (outcome.status === 'error' && outcome.cleanupStarted)) state.outcome = outcome
     else state.error = 'failed'
     return false
   }
