@@ -1052,35 +1052,45 @@ function selectAfterAccountExit() {
   const next = state.accounts.find(item => item.id === state.activeAccountId) ?? state.accounts[0]
   switchAccount(next?.id ?? '')
 }
-export async function signOut() {
-  const id = state.activeAccountId
-  if (isDemo.value) { notify('This is a demo account. Connect a Matrix account to sign in.'); return }
-  await action(async () => {
-    // Sign out revokes the server session when reachable and always erases
-    // the local account: credentials, drafts, crypto store and cached media.
-    const result = await engine.logout(id)
-    clearAccountState(id)
-    selectAfterAccountExit()
-    notify(result?.serverRevoked === false
-      ? 'Signed out on this device. The server session may still be active.'
-      : 'Signed out of this account')
-  })
+// Shared between sign-out and local removal so repeated clicks cannot race.
+const exitingAccounts = new Set<string>()
+export async function signOut(id = state.activeAccountId): Promise<boolean> {
+  const target = state.accounts.find(value => value.id === id)
+  if (!target || target.connection === 'demo' || exitingAccounts.has(id)) return false
+  exitingAccounts.add(id)
+  try {
+    return await action(async () => {
+      // The confirmation captures a session id; switching accounts while the
+      // server responds must not change which session gets revoked.
+      const result = await engine.logout(id)
+      clearAccountState(id)
+      selectAfterAccountExit()
+      notify(result?.serverRevoked === false
+        ? 'Signed out on this device. The server session may still be active.'
+        : 'Signed out of this account')
+      return true
+    }) ?? false
+  } finally { exitingAccounts.delete(id) }
 }
 export function retryConnection(id: string) {
   // Manual re-probe for an offline or errored account: resets the backoff and
   // polls immediately instead of waiting for the next scheduled tick.
   return action(() => engine.retryConnection(id))
 }
-export async function removeAccount(id: string) {
-  if (state.accounts.find(value => value.id === id)?.connection === 'demo') { notify('The demo account cannot be removed.'); return }
-  await action(async () => {
-    // Remove erases the local account without contacting the server, for
-    // sessions that are already invalid or unreachable.
-    await engine.removeAccount(id)
-    clearAccountState(id)
-    selectAfterAccountExit()
-    notify('Removed this account from this device')
-  })
+export async function removeAccount(id: string): Promise<boolean> {
+  const target = state.accounts.find(value => value.id === id)
+  if (!target || target.connection === 'demo' || exitingAccounts.has(id)) return false
+  exitingAccounts.add(id)
+  try {
+    return await action(async () => {
+      // Local-only removal deliberately does not revoke the server session.
+      await engine.removeAccount(id)
+      clearAccountState(id)
+      selectAfterAccountExit()
+      notify('Removed this account from this device')
+      return true
+    }) ?? false
+  } finally { exitingAccounts.delete(id) }
 }
 function clearAccountState(id: string) {
   if (state.thread?.accountId === id) closeThread()

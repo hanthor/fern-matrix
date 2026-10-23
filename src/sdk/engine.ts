@@ -1,6 +1,7 @@
 import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterface, RoomInterface, TimelineInterface, TimelineItemInterface, EventTimelineItem, MediaSourceInterface, SessionVerificationControllerInterface, SessionVerificationRequestDetails, RoomListEntriesWithDynamicAdaptersResultInterface, RoomDescription, ShieldState, SsoHandlerInterface, GrantQrLoginProgressListener, QrLoginProgressListener } from './generated/matrix_sdk_ffi'
 import type { OAuthAuthorizationDataInterface } from './generated/matrix_sdk'
 import type { Account, Room, Message, Member, DirectoryRoom, SpaceChild } from '../types'
+import type { ExitRecoveryStatus } from '../session-exit'
 import type { RoomNotificationMode } from './generated/matrix_sdk_ffi'
 import { applyDiffs } from '../diff'
 import { extractMentions, markdownToHtml, stripReplyFallback } from '../format'
@@ -93,18 +94,48 @@ function savedAccounts(): Record<string, SessionRecord> {
 async function adoptLegacySecrets(secrets: [string, SessionSecrets][]): Promise<void> {
   for (const [storeId, entry] of secrets) {
     if (cachedSecrets(storeId)) continue
-    try { await persistSecrets(storeId, entry) }
+    try { await persistSession(storeId, entry) }
     catch { continue }
+    if (isRemovingSession(storeId)) continue
     const raw = readSessionRecords()
     const record = splitLegacyRecords({ [storeId]: raw[storeId] }).records[storeId]
     if (record) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...raw, [storeId]: record }))
   }
 }
+// A cleanup tombstone is independent of routing metadata so a partial
+// deletion remains retryable but cannot restore or refresh this session.
+const removingSessions = new Set<string>()
+const sessionWrites = new Map<string, Set<Promise<void>>>()
+const removalKey = (id: string) => `fern.removing.${id}`
+function isRemovingSession(id: string): boolean {
+  return removingSessions.has(id) || localStorage.getItem(removalKey(id)) === '1'
+}
+function persistSession(id: string, secrets: SessionSecrets): Promise<void> {
+  if (isRemovingSession(id)) return Promise.reject(new Error('This session is being removed from this device.'))
+  const pending = persistSecrets(id, secrets)
+  const writes = sessionWrites.get(id) ?? new Set<Promise<void>>()
+  writes.add(pending); sessionWrites.set(id, writes)
+  const finish = () => { writes.delete(pending); if (!writes.size) sessionWrites.delete(id) }
+  void pending.then(finish, finish)
+  return pending
+}
+async function drainSessionWrites(id: string): Promise<void> {
+  const writes = [...(sessionWrites.get(id) ?? [])]
+  if (!writes.length) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(writes),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('A session secret write has not finished; retry local removal.')), 5000) }),
+    ])
+  } finally { if (timer !== undefined) clearTimeout(timer) }
+}
 function saveRecord(id: string, record: SessionRecord) {
+  if (isRemovingSession(id)) return
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readSessionRecords(), [id]: record }))
 }
 async function commitSession(storeId: string, secrets: SessionSecrets): Promise<Session> {
-  await persistSecrets(storeId, secrets)
+  await persistSession(storeId, secrets)
   saveRecord(storeId, { userId: secrets.session.userId, homeserverUrl: secrets.session.homeserverUrl })
   return secrets.session
 }
@@ -129,6 +160,31 @@ function deleteIdbDatabase(name: string): Promise<void> {
       request.onsuccess = request.onerror = request.onblocked = () => resolve()
     } catch { resolve() }
   })
+}
+// Session exit must not mistake a queued/blocked deletion for completed erasure.
+// Keep the abandoned-login helper above unchanged.
+function deleteExitDatabase(name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let blocked = false
+    const timer = setTimeout(() => reject(new Error(blocked ? 'Database deletion remained blocked' : 'Database deletion timed out')), 5000)
+    const finish = (error?: Error) => {
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    try {
+      const request = indexedDB.deleteDatabase(name)
+      request.onsuccess = () => finish()
+      request.onerror = () => finish(new Error('Database deletion failed'))
+      request.onblocked = () => { blocked = true }
+    } catch { finish(new Error('Database deletion could not start')) }
+  })
+}
+export class LocalCleanupError extends Error {
+  constructor(readonly failures: unknown[]) {
+    super('Local cleanup did not finish. The server session may already be revoked or deactivated. Retry removing this session from this device.')
+    this.name = 'LocalCleanupError'
+  }
 }
 export interface EngineEvents {
   account(account: Account): void
@@ -231,18 +287,20 @@ export class MatrixEngine {
       .autoEnableCrossSigning(true)
       .setSessionDelegate({
         retrieveSessionFromKeychain: userId => {
+          if (isRemovingSession(data.storeId)) throw new Error('This session needs local cleanup. Remove it from this device again.')
           const found = Object.entries(savedAccounts()).find(([storeId, record]) => record.userId === userId && storeId === data.storeId)
           const secrets = found ? cachedSecrets(found[0]) : undefined
           if (!secrets) throw new Error('Sign in again on this device: the saved session secret is missing.')
           return sdk.Session.new(secrets.session)
         },
         saveSessionInKeychain: session => {
+          if (isRemovingSession(data.storeId)) return
           data.session = session
           // Refreshes are persisted only after this login has been committed.
           if (savedAccounts()[data.storeId]) {
             // The cache primes synchronously for the delegate; a failed
             // keychain write surfaces instead of silently losing the rotation.
-            persistSecrets(data.storeId, { session, passphrase: data.passphrase })
+            persistSession(data.storeId, { session, passphrase: data.passphrase })
               .catch(error => { this.events.error(data.storeId, `Saving the refreshed session failed (${errorText(error)}). Sign in again if sync stops.`) })
             saveRecord(data.storeId, { userId: session.userId, homeserverUrl: session.homeserverUrl })
           }
@@ -419,7 +477,7 @@ export class MatrixEngine {
   }
   /** Re-prime the secrets cache (post-unlock): reads decrypt with the live key. */
   async warmSecrets(): Promise<void> {
-    await Promise.allSettled(Object.keys(savedAccounts()).map(id => loadSecrets(id)))
+    await Promise.allSettled(Object.keys(savedAccounts()).filter(id => !isRemovingSession(id)).map(id => loadSecrets(id)))
   }
   async restoreAll() {
     const entries = Object.entries(savedAccounts())
@@ -427,6 +485,7 @@ export class MatrixEngine {
       const account: Account = { id, userId: record.userId, name: record.userId.split(':')[0].slice(1), color: '#477962', connection: 'connecting' }
       this.events.account(account)
       try {
+        if (isRemovingSession(id)) throw new Error('Local cleanup is incomplete. Remove this session from this device again.')
         const secrets = cachedSecrets(id) ?? await loadSecrets(id)
         if (!secrets) throw new Error('The saved session secret is missing on this device. Sign in again.')
         const sdk = await loadSdk()
@@ -459,9 +518,10 @@ export class MatrixEngine {
     void this.refreshRooms(id)
   }
   private async attach(client: ClientInterface, id: string) {
+    if (isRemovingSession(id)) throw new Error('Local cleanup is incomplete. Remove this session from this device again.')
     const token = (this.attachTokens.get(id) ?? 0) + 1
     this.attachTokens.set(id, token)
-    const current = () => this.alive && this.attachTokens.get(id) === token && savedAccounts()[id] !== undefined
+    const current = () => this.alive && !isRemovingSession(id) && this.attachTokens.get(id) === token && savedAccounts()[id] !== undefined
     this.clients.set(id, client)
     const account: Account = { id, userId: client.userId(), name: client.userId().split(':')[0].slice(1), color: '#477962', connection: 'connecting' }
     this.events.account(account)
@@ -474,7 +534,9 @@ export class MatrixEngine {
       this.events.error(id, unsupported)
       return
     }
+    if (!current()) return
     const sync = await client.syncService().withOfflineMode().finish()
+    if (!current()) { await sync.stop(); return }
     this.syncs.set(id, sync)
     const handles: TaskHandleInterface[] = []
     this.handles.set(id, handles)
@@ -1272,6 +1334,25 @@ export class MatrixEngine {
   // own poll, and members who may redact others can end anyone's (mirrors the
   // pin/unpin power-level pattern instead of attempting a forbidden event).
   async pollModPower(accountId: string, roomId: string) { return (await this.getRoom(accountId, roomId).roomInfo()).powerLevels?.canOwnUserRedactOther() ?? false }
+  // Advisory checks only: never create, rotate or delete recovery material.
+  // Unknown is preserved on server errors; another device is not proof that
+  // the user has saved a recovery key or that all history has been backed up.
+  async sessionExitStatus(accountId: string, signal: AbortSignal): Promise<ExitRecoveryStatus> {
+    const sdk = await loadSdk()
+    if (signal.aborted) return { recovery: 'Unknown', backupExists: 'unknown', lastDevice: 'unknown' }
+    const encryption = this.getClient(accountId).encryption()
+    const value = sdk.RecoveryState[encryption.recoveryState()]
+    const recovery = value === 'Enabled' || value === 'Disabled' || value === 'Incomplete' ? value : 'Unknown'
+    const [backup, last] = await Promise.allSettled([
+      encryption.backupExistsOnServer({ signal }),
+      encryption.isLastDevice({ signal }),
+    ])
+    return {
+      recovery,
+      backupExists: backup.status === 'fulfilled' ? backup.value : 'unknown',
+      lastDevice: last.status === 'fulfilled' ? last.value : 'unknown',
+    }
+  }
   async security(accountId: string) {
     const sdk = await loadSdk()
     const client = this.getClient(accountId)
@@ -1665,30 +1746,50 @@ export class MatrixEngine {
     await this.eraseLocal(accountId)
   }
   private async eraseLocal(accountId: string) {
+    // Keep the public routing record until every deletion succeeds. A failed
+    // secret or database deletion must remain addressable after retry/reload.
+    const failures: unknown[] = []
+    const attempt = async (work: () => unknown | Promise<unknown>) => {
+      try { await work() } catch (error) { failures.push(error) }
+    }
+    removingSessions.add(accountId)
+    await attempt(() => localStorage.setItem(removalKey(accountId), '1'))
     this.attachTokens.set(accountId, (this.attachTokens.get(accountId) ?? 0) + 1)
-    // Records are keyed by store id, so the account id drops its own stores.
-    const storeId = savedAccounts()[accountId] ? accountId : undefined
-    await this.syncs.get(accountId)?.stop().catch(() => {})
-    this.handles.get(accountId)?.forEach(handle => { try { handle.cancel() } catch { /* Handles may already be stopped. */ } })
+    await attempt(() => this.syncs.get(accountId)?.stop())
+    for (const handle of this.handles.get(accountId) ?? []) await attempt(() => handle.cancel())
     const timer = this.timers.get(accountId)
     if (timer) clearTimeout(timer)
-    this.roomLists.delete(accountId); this.verificationControllers.get(accountId)?.setDelegate(undefined); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
+    await attempt(() => this.verificationControllers.get(accountId)?.setDelegate(undefined))
+    this.roomLists.delete(accountId); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
     this.clients.delete(accountId); this.syncs.delete(accountId); this.handles.delete(accountId); this.timers.delete(accountId)
     this.refreshFailures.delete(accountId); this.refreshMarkedOffline.delete(accountId)
     for (const key of [...this.createdEncrypted]) if (key.startsWith(`${accountId}/`)) this.createdEncrypted.delete(key)
-    this.attachTokens.delete(accountId)
-    const entries = savedAccounts(); delete entries[accountId]; localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
-    await dropSecrets(accountId).catch(error => { this.events.error(accountId, `Removing the saved secret failed (${errorText(error)}). Remove the account again to retry.`) })
-    for (let index = localStorage.length - 1; index >= 0; index--) {
-      const key = localStorage.key(index)
-      if (key?.startsWith(draftPrefix(accountId))) localStorage.removeItem(key)
+    // Leave the incremented attachment token invalidating outstanding callbacks.
+    // Writes accepted before the tombstone must settle before the final delete.
+    let writesSettled = false
+    await attempt(async () => { await drainSessionWrites(accountId); writesSettled = true })
+    // Never race the final secret delete against an unresolved keychain write.
+    // Independent local cleanup still proceeds; tombstone and routing survive.
+    if (writesSettled) await attempt(() => dropSecrets(accountId, true))
+    await attempt(() => {
+      for (let index = localStorage.length - 1; index >= 0; index--) {
+        const key = localStorage.key(index)
+        if (key?.startsWith(draftPrefix(accountId))) localStorage.removeItem(key)
+      }
+    })
+    for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) {
+      await attempt(() => URL.revokeObjectURL(url)); this.objectUrls.delete(key)
     }
-    for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) { URL.revokeObjectURL(url); this.objectUrls.delete(key) }
     for (const map of [this.timelineCache, this.threadTimelines, this.eventCache, this.media]) for (const key of map.keys()) if (key.startsWith(`${accountId}/`)) map.delete(key)
-    // The dropped wrappers are collected while the remaining accounts keep
-    // syncing, which releases the connections so these deletions complete;
-    // callers poll indexedDB.databases() for absence.
-    if (storeId) await dropTempStore(storeId)
+    // Account IDs are store IDs. Always retry all three, even if a previous
+    // attempt erased secrets or the public routing record is already absent.
+    await Promise.all(['', '::matrix-sdk-crypto', '::matrix-sdk-state'].map(suffix =>
+      attempt(() => deleteExitDatabase(`fern-${accountId}${suffix}`))))
+    if (!failures.length) await attempt(() => {
+      const entries = readSessionRecords(); delete entries[accountId]
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+    })
+    if (failures.length) throw new LocalCleanupError(failures)
   }
   async dispose() {
     this.alive = false

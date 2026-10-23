@@ -63,6 +63,29 @@ export async function loadSecrets(storeId: string): Promise<SessionSecrets | nul
   return secrets
 }
 
+// Browser tabs share this origin-scoped lock. Wrapping happens before the
+// lock; the durable removal marker is checked inside the final write boundary.
+async function browserSecretLock<T>(storeId: string, strict: boolean, work: () => T): Promise<T> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  if (!locks) {
+    if (strict) throw new Error('Safe session removal needs browser Web Locks support. Use a supported browser to retry.')
+    return work()
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    return await locks.request(`fern.session-secret.${storeId}`, { signal: controller.signal }, () => {
+      clearTimeout(timer)
+      return work()
+    })
+  } finally { clearTimeout(timer) }
+}
+function assertSessionNotRemoved(storeId: string) {
+  if (localStorage.getItem(`fern.removing.${storeId}`) === '1') {
+    cache.delete(storeId)
+    throw new Error('This session has been removed from this device.')
+  }
+}
 export async function persistSecrets(storeId: string, secrets: SessionSecrets): Promise<void> {
   cache.set(storeId, secrets)
   let raw = JSON.stringify(secrets)
@@ -73,14 +96,22 @@ export async function persistSecrets(storeId: string, secrets: SessionSecrets): 
     if (!sealed) throw new Error('Unlock the app first: secrets cannot persist while locked.')
     raw = JSON.stringify({ enc: sealed })
   }
-  if (isTauri()) await secretSet(entryName(storeId), raw)
-  else fallbackWrite(storeId, raw)
+  if (isTauri()) {
+    // Native keychain IPC is not a cross-process transaction; the exit dialog
+    // requires other native instances closed, and qualification remains open.
+    assertSessionNotRemoved(storeId)
+    await secretSet(entryName(storeId), raw)
+  } else await browserSecretLock(storeId, false, () => {
+    assertSessionNotRemoved(storeId)
+    fallbackWrite(storeId, raw)
+  })
 }
 
-export async function dropSecrets(storeId: string): Promise<void> {
+export async function dropSecrets(storeId: string, strict = false): Promise<void> {
   cache.delete(storeId)
   if (isTauri()) await secretDelete(entryName(storeId))
-  else fallbackRemove(storeId)
+  else if (strict) await browserSecretLock(storeId, true, () => localStorage.removeItem(fallbackKey(storeId)))
+  else await browserSecretLock(storeId, false, () => fallbackRemove(storeId))
 }
 
 // Read every stored entry as plaintext (PIN change/disable prologue).
