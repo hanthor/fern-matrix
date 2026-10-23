@@ -1,3 +1,4 @@
+import { VisibleReadAcknowledger, type ReadTarget } from './read-acknowledgment'
 import { reactive, computed, watch, ref } from 'vue'
 import { demoAccounts, demoRooms, demoMembers, initialDemoMessages } from './demo'
 import { markdownToHtml } from './format'
@@ -221,25 +222,98 @@ export const accountSearchResults = computed<SearchHit[]>(() => {
 })
 // Jump-to-message context for search results, pins, gallery and permalinks.
 // The live watch keeps running underneath; clearing focus returns to it.
-export const focused = ref<{ roomId: string; eventId: string; messages: Message[] } | undefined>()
+export const focused = ref<{ accountId: string; roomId: string; eventId: string; messages: Message[] } | undefined>()
 let focusStop: (() => void) | undefined
-export async function focusMessage(roomId: string, eventId: string) {
-  clearFocus()
-  const accountId = state.activeAccountId
-  if (isDemoAccount(accountId)) {
-    // Demo rooms have no SDK client: slice the surrounding loaded messages.
-    const loaded = state.messages[messageKey(accountId, roomId)] ?? []
-    const index = loaded.findIndex(item => item.id === eventId)
-    if (index === -1) throw new Error('That message is not loaded in this room.')
-    focused.value = { roomId, eventId, messages: loaded.slice(Math.max(0, index - 20), index + 21) }
+let focusGeneration = 0
+let navigationGeneration = 0
+export const roomReadReady = ref(false)
+function ownsReadTarget(target: ReadTarget) {
+  return target.generation === navigationGeneration && target.accountId === state.activeAccountId
+    && target.roomId === state.activeRoomId && !appLocked.value && roomReadReady.value
+    && !focused.value && !state.messageQuery.trim()
+}
+const readAcknowledgments = new VisibleReadAcknowledger(
+  async (target, signal) => {
+    if (!ownsReadTarget(target) || signal.aborted) return false
+    if (isDemoAccount(target.accountId)) return true
+    return engine.markEventRead(target.accountId, target.roomId, target.eventId, signal)
+  },
+  target => {
+    // Live summaries are SDK-authoritative: a newer unseen event may already
+    // have arrived while this receipt was in flight.
+    if (!ownsReadTarget(target) || !isDemoAccount(target.accountId)) return
+    const latest = messages.value.at(-1)
+    if (latest?.id !== target.eventId) return
+    const current = room.value
+    if (current) { current.unread = 0; current.mentions = 0 }
+  },
+  target => {
+    if (ownsReadTarget(target)) state.error = 'Could not send the read receipt. Reopen this room to retry.'
+  },
+)
+export function acknowledgeVisibleRoom(eventId?: string) {
+  const current = room.value
+  const latest = [...messages.value].reverse().find(value => !value.status
+    && (isDemo.value || value.id.startsWith('$')))
+  if (!eventId || !current || current.membership !== 'joined' || latest?.id !== eventId) {
+    readAcknowledgments.clear()
     return
   }
-  const stop = await engine.focusEvent(accountId, roomId, eventId,
-    updated => { if (focused.value?.eventId === eventId) focused.value.messages = updated })
-  focusStop = stop
-  focused.value = { roomId, eventId, messages: [] }
+  const target = { accountId: state.activeAccountId, roomId: state.activeRoomId, eventId, generation: navigationGeneration }
+  if (!ownsReadTarget(target)) { readAcknowledgments.clear(); return }
+  readAcknowledgments.update(target)
 }
-export function clearFocus() { focusStop?.(); focusStop = undefined; focused.value = undefined }
+// A lease, not a route: delayed UI work must not follow the user into another
+// account/room or survive a leave-and-return to the same view.
+export function captureRoomNavigation() {
+  const generation = navigationGeneration
+  const accountId = state.activeAccountId
+  const roomId = state.activeRoomId
+  return () => generation === navigationGeneration && accountId === state.activeAccountId
+    && roomId === state.activeRoomId && !appLocked.value
+}
+export async function focusMessage(roomId: string, eventId: string): Promise<boolean> {
+  clearFocus()
+  const accountId = state.activeAccountId
+  if (appLocked.value || roomId !== state.activeRoomId || !accountId) return false
+  const generation = focusGeneration
+  const ownsNavigation = captureRoomNavigation()
+  const ownsFocus = () => generation === focusGeneration && ownsNavigation()
+  // Install before subscribing: the SDK may deliver its initial snapshot before
+  // addListener resolves. Never replace that snapshot with an empty array later.
+  readAcknowledgments.clear()
+  focused.value = { accountId, roomId, eventId, messages: [] }
+  try {
+    if (isDemoAccount(accountId)) {
+      const loaded = state.messages[messageKey(accountId, roomId)] ?? []
+      const index = loaded.findIndex(item => item.id === eventId)
+      if (index === -1) throw new Error('That message is not loaded in this room.')
+      focused.value.messages = loaded.slice(Math.max(0, index - 20), index + 21)
+      return true
+    }
+    const stop = await engine.focusEvent(accountId, roomId, eventId, updated => {
+      if (ownsFocus() && focused.value?.accountId === accountId
+        && focused.value.roomId === roomId && focused.value.eventId === eventId) focused.value.messages = updated
+    })
+    if (!ownsFocus()) { stop(); return false }
+    focusStop = stop
+    return true
+  } catch (error) {
+    // A stale failure belongs to the abandoned view, not to the current one.
+    if (!ownsFocus()) return false
+    clearFocus()
+    throw error
+  }
+}
+export function clearFocus() {
+  ++focusGeneration
+  const stop = focusStop
+  focusStop = undefined
+  focused.value = undefined
+  stop?.()
+}
+function invalidateRoomNavigation() { ++navigationGeneration; clearFocus(); roomReadReady.value = false; readAcknowledgments.clear() }
+watch(() => [state.activeAccountId, state.activeRoomId], invalidateRoomNavigation, { flush: 'sync' })
 export interface PinItem { eventId: string; message?: Message; missing: boolean; canPin: boolean }
 export const pins = ref<PinItem[]>([])
 export const pinsRoom = ref('')
@@ -389,11 +463,14 @@ export function jumpToFirstUnread(key: string) {
   state.jumpToEvent = anchor.id
   return true
 }
-export async function selectRoom(value: Room) {
+export async function selectRoom(value: Room): Promise<boolean> {
+  invalidateRoomNavigation()
   const generation = ++watchGeneration
   stopWatching?.(); stopWatching = undefined
   closeThread()
   state.activeRoomId = value.id; state.lastRoom[value.accountId] = value.id; state.mobileRoom = true; state.messageQuery = ''; state.typing = []; state.members = []
+  const ownsNavigation = captureRoomNavigation()
+  const ownsSelection = () => generation === watchGeneration && ownsNavigation()
   state.loading = false
   const key = messageKey(value.accountId, value.id)
   const pendingUnread = value.unread
@@ -402,33 +479,46 @@ export async function selectRoom(value: Room) {
     state.messages[key] ??= initialDemoMessages(value)
     noteFirstUnread(key, state.messages[key], pendingUnread)
     state.members = structuredClone(demoMembers)
-    value.unread = 0; value.mentions = 0
+    roomReadReady.value = true
     pollModPower.value = false
-    return
+    return true
   }
-  if (value.membership !== 'joined') return
+  if (value.membership !== 'joined') return false
   state.loading = true
-  await action(async () => {
+  state.error = ''
+  let receivedSnapshot = false
+  let subscribed = false
+  try {
     const stop = await engine.watchRoom(value.accountId, value.id, updated => {
+      if (!ownsSelection()) return
       state.messages[messageKey(value.accountId, value.id)] = updated
       if (pendingUnread > 0 && !state.firstUnread[key]) noteFirstUnread(key, updated, pendingUnread)
       for (const message of updated) void ensureAvatar(value.accountId, message.sender)
-      if (generation === watchGeneration) state.loading = false
-    }, users => { if (generation === watchGeneration) state.typing = users })
-    if (generation !== watchGeneration) { stop(); return }
+      if (ownsSelection()) {
+        state.loading = false
+        receivedSnapshot = true
+        if (subscribed) roomReadReady.value = true
+      }
+    }, users => { if (ownsSelection()) state.typing = users })
+    if (!ownsSelection()) { stop(); return false }
     stopWatching = stop
-    await engine.markRead(value.accountId, value.id)
-    value.unread = 0; value.mentions = 0
+    subscribed = true
+    roomReadReady.value = receivedSnapshot
     const members = await engine.members(value.accountId, value.id)
+    if (!ownsSelection()) return false
     const ignored = isDemoAccount(value.accountId) ? [] : await engine.ignoredUsers(value.accountId)
-    if (generation === watchGeneration) {
-      state.members = members
-      ignoredUsersState.value = ignored
-      for (const member of members) void ensureAvatar(value.accountId, member.id)
-    }
-  })
-  if (generation === watchGeneration) state.loading = false
-  if (generation === watchGeneration) void refreshPollPower()
+    if (!ownsSelection()) return false
+    state.members = members
+    ignoredUsersState.value = ignored
+    for (const member of members) void ensureAvatar(value.accountId, member.id)
+    void refreshPollPower()
+    return true
+  } catch (error) {
+    if (ownsSelection()) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally {
+    if (ownsSelection()) state.loading = false
+  }
 }
 export function switchAccount(id: string) {
   if (id === state.activeAccountId) return
@@ -883,17 +973,36 @@ export function maybeNotify(accountId: string, room: Room, message: Message) {
   } catch { /* headless or blocked contexts stay silent */ }
   return true
 }
-export async function goToSuccessor() {
+const pendingSuccessors = new Set<string>()
+export async function goToSuccessor(): Promise<boolean> {
   const current = room.value
   const target = current?.successor
-  if (!current || !target) return false
-  // A tombstoned room stays readable for history; the replacement takes
-  // over when it is joined, otherwise the server decides the join.
-  const known = state.rooms.find(item => item.accountId === current.accountId && item.id === target && item.membership === 'joined')
-  if (known) { await selectRoom(known); state.mobileRoom = true; return true }
-  if (isDemo.value) return false
-  const id = await action(() => engine.join(state.activeAccountId, target))
-  return id !== undefined
+  if (!current || !target || appLocked.value) return false
+  const accountId = current.accountId
+  const key = messageKey(accountId, current.id)
+  if (pendingSuccessors.has(key)) return false
+  pendingSuccessors.add(key)
+  const ownsNavigation = captureRoomNavigation()
+  state.error = ''
+  try {
+    let joined = state.rooms.find(item => item.accountId === accountId && item.id === target && item.membership === 'joined')
+    if (!joined) {
+      if (isDemoAccount(accountId)) return false
+      const id = await engine.join(accountId, target)
+      if (!ownsNavigation()) return false
+      joined = state.rooms.find(item => item.accountId === accountId && item.id === id && item.membership === 'joined')
+      if (!joined) throw new Error('The replacement room was joined but is not available yet. Try again.')
+    }
+    if (!ownsNavigation()) return false
+    const selection = selectRoom(joined)
+    const ownsSelection = captureRoomNavigation()
+    const ready = await selection
+    return ready && ownsSelection()
+  } catch (error) {
+    // Publish within the ownership check, not via the unscoped action helper.
+    if (ownsNavigation()) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally { pendingSuccessors.delete(key) }
 }
 export async function leaveRoom(value: Room) {
   await action(async () => {
@@ -909,7 +1018,16 @@ export async function leaveRoom(value: Room) {
 export const pollModPower = ref(false)
 async function refreshPollPower() {
   if (!room.value || isDemo.value) { pollModPower.value = false; return }
-  pollModPower.value = await action(() => engine.pollModPower(state.activeAccountId, state.activeRoomId)) ?? false
+  const ownsNavigation = captureRoomNavigation()
+  try {
+    const allowed = await engine.pollModPower(state.activeAccountId, state.activeRoomId)
+    if (ownsNavigation()) pollModPower.value = allowed
+  } catch (error) {
+    if (ownsNavigation()) {
+      pollModPower.value = false
+      state.error = error instanceof Error ? error.message : String(error)
+    }
+  }
 }
 export async function createPoll(question: string, answers: string[], kind: 'disclosed' | 'undisclosed' = 'disclosed') {
   return action(async () => {
@@ -1136,6 +1254,7 @@ export async function retryPendingCleanup(id: string): Promise<ExitOutcome> {
   } finally { pending.busy = false }
 }
 function clearAccountState(id: string) {
+  readAcknowledgments.forgetAccount(id)
   if (state.thread?.accountId === id) closeThread()
   state.accounts = state.accounts.filter(value => value.id !== id)
   state.rooms = state.rooms.filter(value => value.accountId !== id)
@@ -1176,6 +1295,7 @@ export async function initialize() {
 // secrets with a PIN-derived key. Desktop notifications stay silent while
 // locked so message bodies never leak onto a locked screen.
 export const appLocked = ref(isLockEnabled() && !isUnlocked())
+watch(appLocked, invalidateRoomNavigation, { flush: 'sync' })
 export const lockEnabled = ref(isLockEnabled())
 export const lockTimeoutMin = ref(loadLockTimeout())
 export const lockNote = lockProtectionNote()
@@ -1183,19 +1303,29 @@ export function setLockTimeoutMin(minutes: number) {
   try { saveLockTimeout(minutes); lockTimeoutMin.value = minutes }
   catch (error) { state.error = error instanceof Error ? error.message : String(error) }
 }
+let unlockGeneration = 0
 export async function unlockApp(pin: string): Promise<boolean> {
+  const attempt = ++unlockGeneration
   state.error = ''
   try {
-    // Wrong-PIN copy belongs to the caller (translated lock screen); only
-    // lockout failures surface here.
-    if (!await verifyPin(pin)) return false
-  } catch (error) { state.error = error instanceof Error ? error.message : String(error); return false }
+    // Keep the shell locked while secrets warm. Once exposed, rearm the watch
+    // synchronously: no delayed selection may erase newer focus/filter/thread intent.
+    if (!await verifyPin(pin) || attempt !== unlockGeneration) return false
+    await engine.warmSecrets()
+    if (attempt !== unlockGeneration) return false
+  } catch (error) {
+    if (attempt === unlockGeneration) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  }
   appLocked.value = false
-  await engine.warmSecrets()
+  const mobileRoom = state.mobileRoom
+  const selected = room.value ? selectRoom(room.value) : undefined
+  state.mobileRoom = mobileRoom
   await initialize()
-  return true
+  await selected
+  return attempt === unlockGeneration && !appLocked.value
 }
-export function lockNow() { lockApp(); clearSecretsCache(); appLocked.value = true }
+export function lockNow() { ++unlockGeneration; lockApp(); clearSecretsCache(); appLocked.value = true }
 export async function setupAppPin(pin: string): Promise<boolean> {
   state.error = ''
   try {

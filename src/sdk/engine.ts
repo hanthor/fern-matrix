@@ -1199,6 +1199,19 @@ export class MatrixEngine {
     if (cached) { URL.revokeObjectURL(cached); this.objectUrls.delete(key) }
   }
   async paginate(accountId: string, roomId: string) { return (await this.timeline(accountId, roomId)).paginateBackwards(40) }
+  // A visible event, not whichever event happens to be newest after an await.
+  // Never create a new timeline merely to acknowledge an abandoned view.
+  async markEventRead(accountId: string, roomId: string, eventId: string, signal: AbortSignal): Promise<boolean> {
+    const key = `${accountId}/${roomId}`
+    const timeline = this.timelineCache.get(key)
+    const event = this.eventCache.get(`${key}/${eventId}`)
+    if (!this.alive || isRemovingSession(accountId) || !timeline || signal.aborted || event?.eventOrTransactionId.tag !== 'EventId'
+      || event.eventOrTransactionId.inner.eventId !== eventId) return false
+    const sdk = await loadSdk()
+    if (!this.alive || isRemovingSession(accountId) || signal.aborted || this.timelineCache.get(key) !== timeline) return false
+    await timeline.sendReadReceipt(sdk.ReceiptType.Read, eventId, { signal })
+    return true
+  }
   async markRead(accountId: string, roomId: string) { const sdk = await loadSdk(); await this.getRoom(accountId, roomId).markAsRead(sdk.ReceiptType.Read) }
   async typing(accountId: string, roomId: string, value: boolean) { await this.getRoom(accountId, roomId).typingNotice(value) }
   async favorite(accountId: string, roomId: string, value: boolean) { await this.getRoom(accountId, roomId).setIsFavourite(value, undefined); await this.refreshRooms(accountId) }
