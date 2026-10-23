@@ -89,6 +89,7 @@ test('a newer search jump wins while an earlier selection of the same room waits
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   const evidence = await page.evaluate(() => (window as unknown as { navigationEvidence(): { focuses: string[]; scrolls: Array<string | null> } }).navigationEvidence())
   expect(evidence.focuses).toEqual(['$newer-jump'])
+  expect(evidence.scrolls).toContain('$newer-jump')
   expect(evidence.scrolls).not.toContain('$older-jump')
   await expect(page.getByText('Viewing message context')).toBeVisible()
 })

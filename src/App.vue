@@ -26,7 +26,7 @@ import { isTauri, onDeepLink, openExternal, checkAppUpdate, installAppUpdate } f
 import { useI18n } from 'vue-i18n'
 import { setLocale, localeNames, type Locale } from './i18n'
 import { accent, ACCENT_OPTIONS, setAccent } from './accent'
-import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
+import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, captureMessageFocus, ownsMessageFocusError, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
 const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
@@ -73,34 +73,102 @@ async function submitThread() {
 // Jump-to-message for search hits, pins and gallery items: switch rooms when
 // needed, open the focused context, then center the target event.
 let messageJumpGeneration = 0
-async function jumpToHit(hit: SearchHit) {
+let messageIntentGeneration = 0
+let messageNavigationDisposed = false
+let cancelPendingFocus: { generation: number; cancel: () => void } | undefined
+let jumpFlashTimer: ReturnType<typeof setTimeout> | undefined
+let jumpFlashElement: Element | undefined
+const pendingEventNavigation = ref<{ generation: number; owns: () => boolean }>()
+async function navigateToEvent(accountId: string, roomId: string, eventId: string): Promise<boolean> {
+  if (appLocked.value || messageNavigationDisposed) return false
+  const target = state.rooms.find(value => value.accountId === accountId && value.id === roomId && value.membership === 'joined')
+  if (!target || !state.accounts.some(value => value.id === accountId)) {
+    state.error = 'That joined room is no longer available in this account.'
+    return false
+  }
   const jump = ++messageJumpGeneration
+  // Suppress live-latest receipts throughout the explicit historical-event
+  // intent, including the interval before the room watch finishes selecting.
+  pendingEventNavigation.value = { generation: jump, owns: () => true }
   clearFocus()
-  const target = accountRooms.value.find(item => item.id === hit.roomId)
-  if (!target) return
-  const selection = target.id !== state.activeRoomId ? selectRoom(target) : undefined
+  const switchedAccount = accountId !== state.activeAccountId
+  if (switchedAccount) switchAccount(accountId)
+  const selection = switchedAccount || roomId !== state.activeRoomId ? selectRoom(target) : undefined
   const ownsNavigation = captureRoomNavigation()
-  const ready = await selection
-  if ((selection && !ready) || !ownsNavigation() || jump !== messageJumpGeneration) return
-  searchOpen.value = false; state.details = false
-  await jumpToEvent(hit.roomId, hit.message.id)
-}
-async function jumpToEvent(roomId: string, eventId: string) {
-  const jump = ++messageJumpGeneration
-  const ownsNavigation = captureRoomNavigation()
+  const ownsPriorFocus = captureMessageFocus()
+  state.mobileRoom = true
   state.details = false
   state.error = ''
-  let ready: boolean
-  try { ready = await focusMessage(roomId, eventId) }
-  catch (error) {
-    if (ownsNavigation() && jump === messageJumpGeneration) state.error = error instanceof Error ? error.message : String(error)
-    return
+  let intent = messageIntentGeneration
+  const ownsJump = () => !messageNavigationDisposed && ownsNavigation()
+    && jump === messageJumpGeneration && intent === messageIntentGeneration
+  let ownsFocusPhase = ownsPriorFocus
+  pendingEventNavigation.value = { generation: jump, owns: () => ownsJump() && ownsFocusPhase() }
+  try {
+    const selected = await selection
+    if ((selection && !selected) || !ownsJump() || !ownsPriorFocus()) return false
+    searchOpen.value = false
+    intent = messageIntentGeneration
+    const request = focusMessage(roomId, eventId)
+    const context = focused.value
+    ownsFocusPhase = () => focused.value === context
+    cancelPendingFocus = { generation: jump, cancel: () => {
+      if (context && focused.value === context) clearFocus()
+    } }
+    if (!await request || !ownsJump() || context !== focused.value) return false
+    if (!context || !await waitForFocusedEvent(context, eventId, ownsJump)) return false
+    await nextTick()
+    if (!ownsJump() || context !== focused.value) return false
+    const element = timeline.value?.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)
+    if (!element) {
+      state.error = 'The linked message could not be displayed. Try opening it again.'
+      return false
+    }
+    if (element) {
+      element.scrollIntoView({ block: 'center' })
+      jumpFlashElement?.classList.remove('jump-flash')
+      jumpFlashElement = element
+      element.classList.add('jump-flash')
+      clearTimeout(jumpFlashTimer)
+      jumpFlashTimer = setTimeout(() => element.classList.remove('jump-flash'), 2400)
+    }
+    return true
+  } catch (error) {
+    if (ownsJump() && (ownsMessageFocusError(error) ?? ownsFocusPhase())) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally {
+    if (cancelPendingFocus?.generation === jump) cancelPendingFocus = undefined
+    if (pendingEventNavigation.value?.generation === jump) pendingEventNavigation.value = undefined
   }
-  if (!ready || !ownsNavigation() || jump !== messageJumpGeneration) return
-  const context = focused.value
-  await nextTick()
-  if (!ownsNavigation() || jump !== messageJumpGeneration || context !== focused.value) return
-  timeline.value?.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)?.scrollIntoView({ block: 'center' })
+}
+function waitForFocusedEvent(context: NonNullable<typeof focused.value>, eventId: string, ownsJump: () => boolean): Promise<boolean> {
+  return new Promise(resolve => {
+    let done = false
+    let stop = () => {}
+    const finish = (ready: boolean) => {
+      if (done) return
+      done = true; clearTimeout(timer); stop(); resolve(ready)
+    }
+    const check = () => {
+      if (!ownsJump() || focused.value !== context) finish(false)
+      else if (context.messages.some(value => value.id === eventId)) finish(true)
+    }
+    const timer = setTimeout(() => {
+      if (ownsJump() && focused.value === context) state.error = 'The linked message could not be loaded. It may be unavailable or inaccessible.'
+      finish(false)
+    }, 15_000)
+    stop = watch(() => [focused.value, focused.value?.messages.some(value => value.id === eventId),
+      state.activeAccountId, state.activeRoomId, appLocked.value, state.messageQuery, state.thread,
+      state.details, state.mobileRoom, searchOpen.value, searchScope.value], check, { flush: 'sync' })
+    check()
+  })
+}
+async function jumpToHit(hit: SearchHit) {
+  const target = accountRooms.value.find(value => value.id === hit.roomId)
+  if (target) await navigateToEvent(target.accountId, target.id, hit.message.id)
+}
+async function jumpToEvent(roomId: string, eventId: string) {
+  return navigateToEvent(state.activeAccountId, roomId, eventId)
 }
 // First-unread pill: the anchor comes from the SDK notification count at
 // room open; jumping reuses the jumpToEvent scroll-and-flash machinery.
@@ -108,6 +176,8 @@ const unreadAnchor = computed(() => state.firstUnread[messageKey(state.activeAcc
 function jumpUnread() { jumpToFirstUnread(messageKey(state.activeAccountId, state.activeRoomId)) }
 const emojiTarget = ref<Message>()
 const searchOpen = ref(false)
+watch(() => [state.messageQuery, state.thread, state.details, state.mobileRoom, searchOpen.value, searchScope.value],
+  () => { ++messageIntentGeneration; cancelPendingFocus?.cancel() }, { flush: 'sync' })
 const timeline = ref<HTMLElement>()
 const threadPane = ref<HTMLElement>()
 const composer = ref<{ focus?: (options?: FocusOptions) => void }>()
@@ -281,13 +351,18 @@ function openLink(href: string) {
   else { pendingLink.value = { link, accounts: candidates }; open('link') }
 }
 function goToLink(accountId: string, link: Permalink) {
-  const target = state.rooms.find(item => item.accountId === accountId && item.id === link.target)
+  const target = state.rooms.find(item => item.accountId === accountId && item.id === link.target && item.membership === 'joined')
   if (!target) { notify('That room is not in this account'); return }
-  if (accountId !== state.activeAccountId) switchAccount(accountId)
-  reply.value = undefined; edit.value = undefined; endOfHistory.value = false; state.mobileRoom = true
-  void selectRoom(target)
-  if (link.kind === 'event' && link.eventId) state.jumpToEvent = link.eventId
+  reply.value = undefined; edit.value = undefined; endOfHistory.value = false
   modal.value = ''; pendingLink.value = undefined
+  if (link.kind === 'event' && link.eventId) {
+    state.messageQuery = ''
+    void navigateToEvent(accountId, target.id, link.eventId)
+    return
+  }
+  ++messageJumpGeneration; pendingEventNavigation.value = undefined
+  if (accountId !== state.activeAccountId) switchAccount(accountId)
+  void selectRoom(target)
 }
 function chooseFilter(value: string) { state.filter = value; state.spaceId = ''; state.mobileRoom = false }
 function chooseSpace(value: Room) { state.spaceId = state.spaceId === value.id ? '' : value.id; state.filter = 'all'; state.mobileRoom = false }
@@ -1018,30 +1093,14 @@ watch(() => messages.value.at(-1)?.id, (id, previous) => {
   const latest = messages.value.at(-1)
   if (latest && id !== previous && room.value) maybeNotify(state.activeAccountId, room.value, latest)
 })
-watch(() => [state.jumpToEvent, renderedMessages.value.length], async () => {
-  const id = state.jumpToEvent
-  if (!id || !timeline.value) return
-  // Expand the render window to cover the target first: explicit navigation
-  // wins over windowing, so event focus also works for older messages.
-  const position = visibleMessages.value.findIndex(message => message.id === id)
-  if (position >= 0) renderWindow.value = Math.max(renderWindow.value, visibleMessages.value.length - position + 20)
-  await nextTick()
-  let target = timeline.value.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-  let rounds = 0
-  while (!target && !endOfHistory.value && !isDemo.value && rounds < 5) {
-    await loadEarlier()
-    await nextTick()
-    target = timeline.value.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-    rounds += 1
-  }
-  const found = target
-  if (found) {
-    found.scrollIntoView({ block: 'center' })
-    found.classList.add('jump-flash')
-    setTimeout(() => found.classList.remove('jump-flash'), 2400)
-  } else notify('The linked message is not loaded in this room')
+watch(() => state.jumpToEvent, id => {
+  if (!id) return
+  const accountId = state.activeAccountId, roomId = state.activeRoomId
+  // Consume once before starting async work. A completed old jump must never
+  // clear a newer request, nor paginate whichever room happens to be active.
   state.jumpToEvent = ''
-})
+  void navigateToEvent(accountId, roomId, id)
+}, { flush: 'sync' })
 watch(modal, (_value, previous) => {
   if (previous === 'explore') { ++directoryGeneration; directorySession?.stop(); directorySession = undefined }
   if (previous === 'call') { ++callGeneration; stopCall?.(); stopCall = undefined; callIframe = undefined }
@@ -1087,7 +1146,7 @@ function eventReadGeometry(pane: HTMLElement, eventId: string) {
 function readTargetGeometry() {
   const pane = timeline.value
   if (!pane || !roomReadReady.value || !foregroundReadView() || focused.value || state.messageQuery.trim()
-    || state.details || (phoneLayout() && !state.mobileRoom)) return undefined
+    || pendingEventNavigation.value?.owns() || state.details || (phoneLayout() && !state.mobileRoom)) return undefined
   const latest = latestConfirmedReadEvent.value
   return latest && eventReadGeometry(pane, latest.id)
 }
@@ -1142,10 +1201,10 @@ function stopReadVisibility() {
   window.visualViewport?.removeEventListener('scroll', scheduleReadCheck)
 }
 watch(() => [timeline.value, threadPane.value, state.activeAccountId, state.activeRoomId, state.mobileRoom, appLocked.value,
-  roomReadReady.value, threadReadReady.value, focused.value, state.messageQuery, modal.value, forwardOpen.value, sessionExit.state.target,
+  roomReadReady.value, threadReadReady.value, pendingEventNavigation.value, focused.value, state.messageQuery, modal.value, forwardOpen.value, sessionExit.state.target,
   state.details, state.thread, latestConfirmedReadEvent.value?.id, latestConfirmedThreadEvent.value?.id, confirmedThreadEvents.value.length], scheduleReadCheck, { flush: 'sync' })
 onMounted(() => { startReadVisibility(); document.addEventListener('keydown', shortcut); document.addEventListener('pointerdown', pokeLock); document.addEventListener('keydown', pokeLock); watchLock(); window.addEventListener('message', onOidcMessage); window.visualViewport?.addEventListener('resize', viewportReveal); void onDeepLink(completeOidcFromUrl).then(stop => { stopDeepLink = stop ?? undefined }); void initialize(); void scrollToEnd() })
-onUnmounted(() => { stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
+onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; clearFocus(); pendingEventNavigation.value = undefined; clearTimeout(jumpFlashTimer); stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
 </script>
 
 <template>
