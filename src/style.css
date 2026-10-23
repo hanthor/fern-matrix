@@ -231,7 +231,12 @@ kbd { font-family: inherit; white-space: nowrap; font-size: 10px; color: var(--m
 .welcome-view h1 { font-size: 33px; font-weight: 500; letter-spacing: -1.3px; line-height: 1.35; margin: 16px 0; }
 .welcome-view p { color: var(--muted); font-size: 12px; line-height: 1.9; margin-bottom: 25px; }
 /* Login gate: shown instead of the workspace when no account exists. */
-.welcome-gate { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px 20px; }
+.welcome-gate { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; text-align: center; padding: 24px max(20px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px)); }
+.gate-content { flex: none; width: min(100%, 480px); margin: auto; display: flex; flex-direction: column; align-items: center; }
+.welcome-gate .gate-actions { width: min(100%, 288px); flex-direction: column; flex-wrap: nowrap; gap: 10px; }
+.welcome-gate .gate-actions > button { width: 100%; min-height: 44px; height: auto; white-space: normal; }
+.welcome-gate .eyebrow { padding-inline-start: .12em; }
+@media (max-width: 480px) { .welcome-gate .gate-content h1 { font-size: 29px; text-wrap: balance; } }
 .welcome-gate h1 { font-size: 33px; font-weight: 500; letter-spacing: -1.3px; line-height: 1.35; margin: 16px 0; }
 .welcome-gate p { color: var(--muted); font-size: 12px; line-height: 1.9; margin: 0 0 25px; max-width: 420px; }
 .gate-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }

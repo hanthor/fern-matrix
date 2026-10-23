@@ -36,6 +36,14 @@ jobs:
         continue-on-error: true
         run: npm run test:integration -- --grep "live password login|removing one account|email capability and local removal|authenticated avatars"
       - run: npm run test:e2e
+      - name: Save signed-out entry artwork screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entry-artwork
+          path: test-results/**/entry-dark.png
+          if-no-files-found: ignore
+          retention-days: 7
       - run: npm run test:integration
       - run: npm run test:sso
       - run: npm run build
