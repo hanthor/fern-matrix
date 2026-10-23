@@ -23,7 +23,7 @@ import { isTauri, onDeepLink, openExternal, checkAppUpdate, installAppUpdate } f
 import { useI18n } from 'vue-i18n'
 import { setLocale, localeNames, type Locale } from './i18n'
 import { accent, ACCENT_OPTIONS, setAccent } from './accent'
-import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
+import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
 const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
@@ -69,21 +69,35 @@ async function submitThread() {
 }
 // Jump-to-message for search hits, pins and gallery items: switch rooms when
 // needed, open the focused context, then center the target event.
+let messageJumpGeneration = 0
 async function jumpToHit(hit: SearchHit) {
+  const jump = ++messageJumpGeneration
+  clearFocus()
   const target = accountRooms.value.find(item => item.id === hit.roomId)
-  if (target && target.id !== state.activeRoomId) await selectRoom(target)
+  if (!target) return
+  const selection = target.id !== state.activeRoomId ? selectRoom(target) : undefined
+  const ownsNavigation = captureRoomNavigation()
+  const ready = await selection
+  if ((selection && !ready) || !ownsNavigation() || jump !== messageJumpGeneration) return
   searchOpen.value = false; state.details = false
-  await action(() => focusMessage(hit.roomId, hit.message.id))
-  if (state.error) return
-  await nextTick()
-  document.querySelector(`[data-message-id="${CSS.escape(hit.message.id)}"]`)?.scrollIntoView({ block: 'center' })
+  await jumpToEvent(hit.roomId, hit.message.id)
 }
 async function jumpToEvent(roomId: string, eventId: string) {
+  const jump = ++messageJumpGeneration
+  const ownsNavigation = captureRoomNavigation()
   state.details = false
-  await action(() => focusMessage(roomId, eventId))
-  if (state.error) return
+  state.error = ''
+  let ready: boolean
+  try { ready = await focusMessage(roomId, eventId) }
+  catch (error) {
+    if (ownsNavigation() && jump === messageJumpGeneration) state.error = error instanceof Error ? error.message : String(error)
+    return
+  }
+  if (!ready || !ownsNavigation() || jump !== messageJumpGeneration) return
+  const context = focused.value
   await nextTick()
-  document.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)?.scrollIntoView({ block: 'center' })
+  if (!ownsNavigation() || jump !== messageJumpGeneration || context !== focused.value) return
+  timeline.value?.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)?.scrollIntoView({ block: 'center' })
 }
 // First-unread pill: the anchor comes from the SDK notification count at
 // room open; jumping reuses the jumpToEvent scroll-and-flash machinery.
@@ -190,7 +204,7 @@ const channels = computed(() => filteredRooms.value.filter(value => !value.favor
 const people = computed(() => filteredRooms.value.filter(value => !value.favorite && value.direct && value.membership === 'joined'))
 const invites = computed(() => filteredRooms.value.filter(value => value.membership === 'invited'))
 // Focused context replaces the live window while active (same room only).
-const inFocus = computed(() => focused.value?.roomId === state.activeRoomId)
+const inFocus = computed(() => focused.value?.accountId === state.activeAccountId && focused.value?.roomId === state.activeRoomId)
 const timelineMessages = computed(() => inFocus.value ? focused.value!.messages : renderedMessages.value)
 const focusBase = computed(() => inFocus.value ? 0 : visibleMessages.value.length - renderedMessages.value.length)
 const focusTotal = computed(() => inFocus.value ? focused.value!.messages.length : visibleMessages.value.length)
@@ -930,7 +944,7 @@ watch(() => [state.activeAccountId, state.activeRoomId], (_value, previous) => {
   if (previous?.[0] && previous[1] && state.accounts.some(item => item.id === previous[0])) { const key = `fern.draft.${previous[0]}/${previous[1]}`; if (draft.value) localStorage.setItem(key, draft.value); else localStorage.removeItem(key) }
   draft.value = localStorage.getItem(`fern.draft.${state.activeAccountId}/${state.activeRoomId}`) ?? ''
   reply.value = undefined; edit.value = undefined; mention.value = undefined; endOfHistory.value = false; renderWindow.value = 150
-  cancelVoice(); discardVoice(); cancelLocationShare(); clearFocus()
+  cancelVoice(); discardVoice(); cancelLocationShare()
   if (detailsTab.value === 'pins') void loadPins()
   void scrollToEnd()
 })
