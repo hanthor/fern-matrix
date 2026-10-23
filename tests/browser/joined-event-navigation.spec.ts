@@ -255,6 +255,7 @@ test('an unjoined event link never starts room selection, focus or pagination', 
   await clickLink(page)
   await expect(page.getByRole('heading', { name: 'Link origin', exact: true })).toBeVisible()
   expect(await evidence(page)).toMatchObject({ focuses: [], paginations: 0 })
+  await expect(page.locator('[data-sonner-toaster]')).toHaveCount(1)
   await expect(page.getByText('That room is not in any connected account', { exact: true })).toBeVisible()
 })
 
