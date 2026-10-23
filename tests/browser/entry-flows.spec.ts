@@ -40,14 +40,18 @@ for (const action of ['signOut', 'remove', 'deactivate'] as const) {
         state.activeAccountId = 'real-exit'
         state.activeRoomId = 'general'
         engine.typing = async () => {}
-        const eraseDrafts = async () => {
-          for (const key of Object.keys(localStorage)) {
-            if (key.startsWith('fern.draft.real-exit/')) localStorage.removeItem(key)
-          }
+        // Use the actual shared tombstone/lock boundary so a late composer
+        // write is rejected just as it is during real session cleanup.
+        // @ts-expect-error Vite resolves this browser-only source import.
+        const { markSessionRemoving, deleteSessionDrafts } = await import('/src/session-storage.ts')
+        const eraseDrafts = async (id: string) => {
+          markSessionRemoving(id)
+          await deleteSessionDrafts(id)
+          return { status: 'complete' as const }
         }
-        engine.logout = async () => { await eraseDrafts(); return { serverRevoked: true } }
+        engine.logout = async (id: string) => ({ ...await eraseDrafts(id), serverRevoked: true })
         engine.removeAccount = eraseDrafts
-        engine.deactivate = eraseDrafts
+        engine.deactivate = async (id: string) => eraseDrafts(id)
       })
       const composer = page.getByRole('textbox', { name: 'Message composer' })
       await expect(composer).toBeVisible()

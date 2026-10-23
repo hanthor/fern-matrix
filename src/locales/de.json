@@ -435,10 +435,18 @@
     "signoutAction": "Abmelden und lokale Daten löschen",
     "removeAction": "Lokale Sitzungsdaten löschen",
     "errors": {
-      "failed": "Die lokale Bereinigung wurde nicht abgeschlossen. Die Serversitzung wurde möglicherweise bereits widerrufen. Entferne die Sitzung erneut von diesem Gerät; möglicherweise sind noch lokale Daten vorhanden.",
+      "failed": "Der Vorgang konnte nicht abgeschlossen werden. Prüfe deine Verbindung und Kontodaten, bevor du es erneut versuchst.",
       "missing": "Diese Sitzung ist nicht mehr verfügbar. Wähle Abbrechen, um zu Fern zurückzukehren."
     },
     "localSession": "Lokale Sitzung: {id}",
-    "nativeWarning": "Schließe vor dem Fortfahren alle anderen Fern-Fenster und App-Instanzen. Die Entfernung kann die Löschung in anderen laufenden nativen Instanzen nicht überprüfen."
+    "nativeWarning": "Schließe vor dem Fortfahren alle anderen Fern-Fenster und App-Instanzen. Die Entfernung kann die Löschung in anderen laufenden nativen Instanzen nicht überprüfen.",
+    "cleanupTitle": "Lokale Bereinigung nicht abgeschlossen",
+    "restartRequired": "Einige lokale Datenbanken sind noch geöffnet. Die lokalen Daten sind noch nicht vollständig gelöscht. Schließe andere Fern-Fenster und starte Fern neu, um die Bereinigung abzuschließen. Blockiert ein anderes Fenster die Löschung weiterhin, bleibt dieser Hinweis bestehen.",
+    "cleanupError": "Die lokale Bereinigung ist fehlgeschlagen. Die Serversitzung kann bereits abgemeldet oder das Konto deaktiviert sein. Gehe nicht davon aus, dass alle lokalen Daten gelöscht wurden. Wiederhole vor einem Neustart die lokale Bereinigung. Abmeldung und Deaktivierung werden dabei nicht erneut ausgeführt.",
+    "restart": "Fern zum Abschluss der Bereinigung neu starten",
+    "retryLocal": "Lokale Bereinigung wiederholen",
+    "serverStillActive": "Die Serversitzung kann weiterhin aktiv sein.",
+    "close": "Schließen",
+    "draftStorageError": "Ein Entwurf konnte nicht gespeichert oder geladen werden. Prüfe den Browserspeicher und versuche es vor einem Neustart erneut."
   }
 }

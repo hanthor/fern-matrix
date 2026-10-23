@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FrappeUIProvider, ToastProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
 import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert } from 'lucide-vue-next'
 import UserAvatar from './components/UserAvatar.vue'
+import { saveSessionDraft, readSessionDraft, isSessionRemoving } from './session-storage'
 import SessionExitDialog from './components/SessionExitDialog.vue'
 import { createSessionExit, canResetRecovery, type SessionExitMode } from './session-exit'
 import MessageRow from './components/MessageRow.vue'
@@ -23,7 +24,7 @@ import { isTauri, onDeepLink, openExternal, checkAppUpdate, installAppUpdate } f
 import { useI18n } from 'vue-i18n'
 import { setLocale, localeNames, type Locale } from './i18n'
 import { accent, ACCENT_OPTIONS, setAccent } from './accent'
-import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
+import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
 const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
@@ -120,6 +121,7 @@ const sessionExit = createSessionExit({
   locked: () => appLocked.value,
   exists: id => state.accounts.some(value => value.id === id && value.connection !== 'demo'),
   inspect: (id, signal) => engine.sessionExitStatus(id, signal),
+  retry: id => retryPendingCleanup(id),
   execute: target => target.mode === 'signout' ? signOut(target.id) : removeAccount(target.id),
 })
 let exitReturnModal = ''
@@ -550,7 +552,8 @@ async function submitDeactivate() {
   if (!form.value.accountPassword) { state.error = 'Enter the account password to deactivate.'; return }
   modalBusy.value = true
   try {
-    if (await deactivateAccount(form.value.accountPassword, form.value.eraseData)) {
+    const result = await deactivateAccount(form.value.accountPassword, form.value.eraseData)
+    if (result.status !== 'error' || result.cleanupStarted) {
       form.value.accountPassword = ''; form.value.deactivateAck = false; modal.value = ''
     }
   } finally { modalBusy.value = false }
@@ -924,17 +927,74 @@ async function sendLocationShare() {
   if (await sendLocation({ ...fix, description: locationDescription.value })) { cancelLocationShare(); await scrollToEnd() }
 }
 function dropFile(event: DragEvent) { event.preventDefault(); const file = event.dataTransfer?.files[0]; if (file) void upload(file) }
-watch(() => [state.activeAccountId, state.activeRoomId], (_value, previous) => {
-  // Account erasure already removed its drafts; a late view watcher must not
-  // recreate them. Ordinary room/account switches still preserve input.
-  if (previous?.[0] && previous[1] && state.accounts.some(item => item.id === previous[0])) { const key = `fern.draft.${previous[0]}/${previous[1]}`; if (draft.value) localStorage.setItem(key, draft.value); else localStorage.removeItem(key) }
-  draft.value = localStorage.getItem(`fern.draft.${state.activeAccountId}/${state.activeRoomId}`) ?? ''
+// The composer owns a captured session/room pair. Account changes cannot
+// redirect an already queued write to a different account.
+let draftOwner = { id: state.activeAccountId, roomId: state.activeRoomId }
+const unsavedDrafts = new Map<string, { id: string; roomId: string; text: string }>()
+const draftWrites = new Set<Promise<void>>()
+const restartingCleanup = ref(false)
+let draftWritable = false
+let loadingDraft = false
+function loadComposerDraft() {
+  loadingDraft = true
+  try {
+    const cached = unsavedDrafts.get(JSON.stringify([draftOwner.id, draftOwner.roomId]))
+    draft.value = isSessionRemoving(draftOwner.id) ? '' : cached?.text ?? readSessionDraft(draftOwner.id, draftOwner.roomId)
+    draftWritable = true
+  } catch {
+    draftWritable = false
+    draft.value = ''
+    state.error = t('sessionExit.draftStorageError')
+  } finally { loadingDraft = false }
+}
+loadComposerDraft()
+function persistDraft(id: string, roomId: string, text: string): Promise<void> {
+  if (!id || !roomId) return Promise.resolve()
+  const key = JSON.stringify([id, roomId])
+  const entry = { id, roomId, text }
+  unsavedDrafts.set(key, entry)
+  const write = saveSessionDraft(id, roomId, text).then(() => {
+    if (unsavedDrafts.get(key) === entry) unsavedDrafts.delete(key)
+  }).catch(() => { state.error = t('sessionExit.draftStorageError') })
+  draftWrites.add(write)
+  void write.finally(() => draftWrites.delete(write))
+  return write
+}
+async function restartForCleanup() {
+  if (appLocked.value || restartingCleanup.value || !state.pendingCleanups.some(item => item.status === 'restart-required')) return
+  // A non-database failure might include a missing durable marker. Repair it
+  // locally first; restarting is not a safe substitute for that repair.
+  if (state.pendingCleanups.some(item => item.status === 'error' || item.busy)) return
+  if (!draftWritable) { loadComposerDraft(); if (!draftWritable) return }
+  restartingCleanup.value = true
+  try {
+    await persistDraft(draftOwner.id, draftOwner.roomId, draft.value)
+    while (draftWrites.size) await Promise.all([...draftWrites])
+    for (const entry of [...unsavedDrafts.values()]) await persistDraft(entry.id, entry.roomId, entry.text)
+    while (draftWrites.size) await Promise.all([...draftWrites])
+    if (unsavedDrafts.size) { state.error = t('sessionExit.draftStorageError'); return }
+    // Cleanup and lock state can change while draft storage is awaited.
+    if (appLocked.value || state.pendingCleanups.some(item => item.status === 'error' || item.busy)
+      || !state.pendingCleanups.some(item => item.status === 'restart-required')) return
+    window.location.reload()
+  } finally { restartingCleanup.value = false }
+}
+watch(() => [state.activeAccountId, state.activeRoomId], () => {
+  if (draftWritable) void persistDraft(draftOwner.id, draftOwner.roomId, draft.value)
+  draftOwner = { id: state.activeAccountId, roomId: state.activeRoomId }
+  loadComposerDraft()
   reply.value = undefined; edit.value = undefined; mention.value = undefined; endOfHistory.value = false; renderWindow.value = 150
   cancelVoice(); discardVoice(); cancelLocationShare(); clearFocus()
   if (detailsTab.value === 'pins') void loadPins()
   void scrollToEnd()
 })
-watch(draft, value => { const key = `fern.draft.${state.activeAccountId}/${state.activeRoomId}`; if (value) localStorage.setItem(key, value); else localStorage.removeItem(key) })
+watch(draft, value => {
+  if (loadingDraft) return
+  // Only a successful load or an explicit composer edit permits overwriting
+  // storage. A failed-read empty fallback must never erase a saved draft.
+  draftWritable = true
+  void persistDraft(draftOwner.id, draftOwner.roomId, value)
+}, { flush: 'sync' })
 watch(() => messages.value.at(-1)?.id, (id, previous) => {
   const nearEnd = !timeline.value || timeline.value.scrollHeight - timeline.value.scrollTop - timeline.value.clientHeight < 180
   if (nearEnd || !previous || messages.value.at(-1)?.own) void scrollToEnd()
@@ -979,7 +1039,19 @@ onUnmounted(() => { sessionExit.dispose(); document.removeEventListener('keydown
 
 <template>
 <FrappeUIProvider>
+<div class="fern-layout">
   <div v-if="appLocked" class="lock-screen" role="dialog" aria-modal="true" :aria-label="t('lock.dialog')"><div class="lock-card"><Leaf :size="34"/><h1>{{ t('lock.title') }}</h1><p>{{ t('lock.prompt') }}</p><form @submit.prevent="submitUnlock"><FormControl v-model="pinUnlock" type="password" :label="t('lock.pin')" placeholder="••••" autocomplete="current-password" :aria-label="t('lock.pinEntry')"/><ErrorMessage v-if="state.error" :message="state.error"/><Button variant="solid" theme="green" type="submit" :loading="lockBusy">{{ t('lock.unlock') }}</Button></form></div></div>
+  <section v-if="!appLocked && state.pendingCleanups.length" class="cleanup-pending" aria-live="polite" :aria-label="t('sessionExit.cleanupTitle')">
+    <div v-for="pending in state.pendingCleanups" :key="pending.account.id" class="cleanup-pending-item">
+      <strong>{{ t('sessionExit.cleanupTitle') }}</strong>
+      <p>{{ pending.account.name }} · {{ pending.account.userId }} · {{ t('sessionExit.localSession', { id: pending.account.id }) }}</p>
+      <p>{{ t(pending.status === 'restart-required' ? 'sessionExit.restartRequired' : 'sessionExit.cleanupError') }}</p>
+      <p v-if="pending.serverRevoked === false">{{ t('sessionExit.serverStillActive') }}</p>
+      <p v-if="isTauri()">{{ t('sessionExit.nativeWarning') }}</p>
+      <Button v-if="pending.status === 'error'" variant="outline" :loading="pending.busy" @click="retryPendingCleanup(pending.account.id)">{{ t('sessionExit.retryLocal') }}</Button>
+      <Button v-else variant="solid" :loading="restartingCleanup" :disabled="state.pendingCleanups.some(item => item.status === 'error' || item.busy)" @click="restartForCleanup">{{ t('sessionExit.restart') }}</Button>
+    </div>
+  </section>
   <div class="app-shell" :class="{ 'mobile-conversation': state.mobileRoom, 'with-details': state.details }">
     <template v-if="!state.accounts.length">
       <div class="welcome-gate"><span class="welcome-logo"><Leaf :size="44"/></span><span class="eyebrow">FERN · MATRIX</span><h1>{{ t('gate.title') }}</h1><p>{{ t('gate.subtitle') }}</p><div class="gate-actions"><Button variant="solid" theme="green" @click="open('login')">{{ t('nav.connectAccount') }} <ArrowUpRight :size="15"/></Button><Button variant="outline" @click="open('login', 'register')">{{ t('login.createAccount') }}</Button><Button variant="ghost" @click="exploreDemo">{{ t('gate.explore') }}</Button></div></div>
@@ -1062,7 +1134,16 @@ onUnmounted(() => { sessionExit.dispose(); document.removeEventListener('keydown
     <div v-if="modal === 'help'" class="help-content"><span class="welcome-logo"><Leaf :size="35"/></span><h2>A calmer place to connect.</h2><p>Fern speaks Frappe UI on Matrix: Frappe components in a spaces-and-accounts layout.</p><p>The demo is local. Connect an account for real encrypted messaging, room management, reactions, files, and polls.</p><div class="help-shortcuts"><span>Find a conversation <kbd>Ctrl / ⌘ K</kbd></span><span>Send a message <kbd>Enter</kbd></span><span>New line <kbd>Shift Enter</kbd></span></div><p class="form-note">Early development: QR code display, threads, background push, and full Element X parity remain on the roadmap.</p><Button variant="solid" theme="green" @click="open('login')">Connect your account <ArrowUpRight :size="15"/></Button></div>
   </Dialog>
   <Dialog v-model:open="forwardOpen" title="Forward message"><div v-if="forwardDialog" class="dialog-form"><p class="form-note">From <strong>{{ forwardDialog.message.name }}</strong> in <strong>{{ forwardDialog.sourceRoomName }}</strong> ({{ forwardDialog.sourceAccountName }})</p><p class="forward-preview">{{ forwardPreview(forwardDialog.message) }}</p><FormControl v-model="forwardRoomId" type="select" label="Forward to" :options="forwardOptions"/><p v-if="forwardCrossAccount && forwardTarget" class="form-note">This leaves {{ forwardDialog.sourceAccountName }} rooms — members of {{ forwardTarget.accountName }} ({{ forwardTarget.room.name }}) will be able to read it.</p></div><template #actions><Button variant="ghost" @click="cancelForward">Cancel</Button><Button variant="solid" theme="green" :loading="state.busy" @click="confirmForward">Forward</Button></template></Dialog>
-  <SessionExitDialog :state="sessionExit.state" @cancel="cancelSessionExit" @review="reviewExitRecovery"
+  <SessionExitDialog :state="sessionExit.state" :restart-disabled="restartingCleanup || state.pendingCleanups.some(item => item.status === 'error' || item.busy)" @restart="restartForCleanup" @retry="sessionExit.retry()" @cancel="cancelSessionExit" @review="reviewExitRecovery"
     @acknowledge="sessionExit.state.acknowledged = $event" @confirm="sessionExit.confirm()"/>
+</div>
 </FrappeUIProvider>
 </template>
+
+<style scoped>
+.fern-layout { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.fern-layout > .app-shell { flex: 1; min-height: 0; height: auto; }
+.cleanup-pending { flex: 0 1 auto; max-height: 40dvh; overflow: auto; background: var(--card); color: var(--text); border-bottom: 2px solid var(--fern); padding: 12px 18px; }
+.cleanup-pending-item + .cleanup-pending-item { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.cleanup-pending p { margin: 6px 0; overflow-wrap: anywhere; }
+</style>

@@ -1,5 +1,8 @@
 import { reactive } from 'vue'
 
+export type ExitOutcome =
+  | { status: 'complete' | 'restart-required'; serverRevoked?: boolean }
+  | { status: 'error'; cleanupStarted: boolean }
 export type SessionExitMode = 'signout' | 'remove'
 export type RecoveryState = 'Unknown' | 'Enabled' | 'Disabled' | 'Incomplete'
 export interface ExitRecoveryStatus {
@@ -10,6 +13,7 @@ export interface ExitRecoveryStatus {
 export interface ExitTarget { id: string; userId: string; name: string; mode: SessionExitMode }
 export interface SessionExitState {
   target: ExitTarget | null
+  outcome: ExitOutcome | null
   status: ExitRecoveryStatus
   checking: boolean
   busy: boolean
@@ -27,13 +31,14 @@ interface ExitDependencies {
   locked?: () => boolean
   exists: (id: string) => boolean
   inspect: (id: string, signal: AbortSignal) => Promise<ExitRecoveryStatus>
-  execute: (target: ExitTarget) => Promise<boolean>
+  execute: (target: ExitTarget) => Promise<ExitOutcome>
+  retry: (id: string) => Promise<ExitOutcome>
 }
 // One immutable session target per confirmation. Status reads are advisory:
 // even Enabled does not prove that the user has saved a working recovery key.
 export function createSessionExit(deps: ExitDependencies, timeoutMs = 5000) {
   const state = reactive<SessionExitState>({
-    target: null, status: unknownExitRecovery(), checking: false,
+    target: null, outcome: null, status: unknownExitRecovery(), checking: false,
     busy: false, acknowledged: false, error: '',
   })
   let generation = 0
@@ -49,6 +54,7 @@ export function createSessionExit(deps: ExitDependencies, timeoutMs = 5000) {
     ++generation
     stopCheck()
     state.target = null
+    state.outcome = null
     state.checking = false
     state.acknowledged = false
     state.error = ''
@@ -82,26 +88,37 @@ export function createSessionExit(deps: ExitDependencies, timeoutMs = 5000) {
   }
   function review(): ExitTarget | null {
     const target = state.target
-    if (deps.locked?.() || state.busy || !target) return null
+    if (deps.locked?.() || state.busy || state.outcome || !target) return null
     if (!deps.exists(target.id)) { state.error = 'missing'; return null }
     close()
     return target
   }
   async function confirm(): Promise<boolean> {
     const target = state.target
-    if (deps.locked?.() || !target || state.busy || state.checking || !state.acknowledged) return false
+    if (deps.locked?.() || !target || state.busy || state.checking || !state.acknowledged || state.outcome) return false
     if (!deps.exists(target.id)) { state.error = 'missing'; state.acknowledged = false; return false }
     state.busy = true
     state.error = ''
     try {
-      const done = await deps.execute({ ...target })
-      if (done) close()
-      else state.error = 'failed'
-      return done
+      return applyOutcome(await deps.execute({ ...target }))
     } catch {
-      state.error = 'failed'
+      state.outcome = { status: 'error', cleanupStarted: true }
       return false
     } finally { state.busy = false }
   }
-  return { state, request, cancel, review, confirm, dispose: close }
+  function applyOutcome(outcome: ExitOutcome): boolean {
+    if (outcome.status === 'complete') { close(); return true }
+    if (outcome.status === 'restart-required' || outcome.cleanupStarted) state.outcome = outcome
+    else state.error = 'failed'
+    return false
+  }
+  async function retry(): Promise<boolean> {
+    const target = state.target
+    if (deps.locked?.() || !target || state.busy || state.outcome?.status !== 'error') return false
+    state.busy = true
+    try { return applyOutcome(await deps.retry(target.id)) }
+    catch { state.outcome = { status: 'error', cleanupStarted: true }; return false }
+    finally { state.busy = false }
+  }
+  return { state, request, cancel, review, confirm, retry, dispose: close }
 }

@@ -8,6 +8,7 @@
 import type { Session } from './sdk/generated/matrix_sdk_ffi'
 import { isTauri, secretDelete, secretGet, secretSet } from './tauri'
 import { isLockEnabled, unwrapSecret, wrapSecret } from './applock'
+import { isSessionRemoving, sessionStorageLock } from './session-storage'
 
 export interface SessionSecrets { session: Session; passphrase: string }
 const entryName = (storeId: string) => `fern.session.${storeId}`
@@ -26,7 +27,7 @@ function fallbackRemove(storeId: string) {
 
 /** Synchronous hot-path read; null until loaded (see loadSecrets). */
 export function cachedSecrets(storeId: string): SessionSecrets | undefined {
-  return cache.get(storeId)
+  return isSessionRemoving(storeId) ? undefined : cache.get(storeId)
 }
 
 /** Drop all cached plaintexts (app lock): post-lock reads re-decrypt. */
@@ -43,6 +44,7 @@ function parseSecrets(raw: string): SessionSecrets | null {
 }
 
 export async function loadSecrets(storeId: string): Promise<SessionSecrets | null> {
+  if (isSessionRemoving(storeId)) { cache.delete(storeId); return null }
   const hit = cache.get(storeId)
   if (hit) return hit
   const raw = isTauri() ? await secretGet(entryName(storeId)) : fallbackRead(storeId)
@@ -54,39 +56,25 @@ export async function loadSecrets(storeId: string): Promise<SessionSecrets | nul
     if (typeof envelope?.enc === 'string') {
       const open = await unwrapSecret(envelope.enc)
       const secrets = open ? parseSecrets(open) : null
+      if (isSessionRemoving(storeId)) return null
       if (secrets) cache.set(storeId, secrets)
       return secrets
     }
   } catch { return null }
   const secrets = parseSecrets(raw)
+  if (isSessionRemoving(storeId)) return null
   if (secrets) cache.set(storeId, secrets)
   return secrets
 }
 
-// Browser tabs share this origin-scoped lock. Wrapping happens before the
-// lock; the durable removal marker is checked inside the final write boundary.
-async function browserSecretLock<T>(storeId: string, strict: boolean, work: () => T): Promise<T> {
-  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
-  if (!locks) {
-    if (strict) throw new Error('Safe session removal needs browser Web Locks support. Use a supported browser to retry.')
-    return work()
-  }
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 5000)
-  try {
-    return await locks.request(`fern.session-secret.${storeId}`, { signal: controller.signal }, () => {
-      clearTimeout(timer)
-      return work()
-    })
-  } finally { clearTimeout(timer) }
-}
 function assertSessionNotRemoved(storeId: string) {
-  if (localStorage.getItem(`fern.removing.${storeId}`) === '1') {
+  if (isSessionRemoving(storeId)) {
     cache.delete(storeId)
     throw new Error('This session has been removed from this device.')
   }
 }
 export async function persistSecrets(storeId: string, secrets: SessionSecrets): Promise<void> {
+  assertSessionNotRemoved(storeId)
   cache.set(storeId, secrets)
   let raw = JSON.stringify(secrets)
   // A set PIN wraps entries at this layer on every backend, so disabling or
@@ -101,7 +89,7 @@ export async function persistSecrets(storeId: string, secrets: SessionSecrets): 
     // requires other native instances closed, and qualification remains open.
     assertSessionNotRemoved(storeId)
     await secretSet(entryName(storeId), raw)
-  } else await browserSecretLock(storeId, false, () => {
+  } else await sessionStorageLock(storeId, false, () => {
     assertSessionNotRemoved(storeId)
     fallbackWrite(storeId, raw)
   })
@@ -110,8 +98,8 @@ export async function persistSecrets(storeId: string, secrets: SessionSecrets): 
 export async function dropSecrets(storeId: string, strict = false): Promise<void> {
   cache.delete(storeId)
   if (isTauri()) await secretDelete(entryName(storeId))
-  else if (strict) await browserSecretLock(storeId, true, () => localStorage.removeItem(fallbackKey(storeId)))
-  else await browserSecretLock(storeId, false, () => fallbackRemove(storeId))
+  else if (strict) await sessionStorageLock(storeId, true, () => localStorage.removeItem(fallbackKey(storeId)))
+  else await sessionStorageLock(storeId, false, () => fallbackRemove(storeId))
 }
 
 // Read every stored entry as plaintext (PIN change/disable prologue).

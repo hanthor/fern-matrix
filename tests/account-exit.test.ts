@@ -8,6 +8,7 @@ describe('real-account exits never enter the tour', () => {
   beforeEach(() => {
     // Keep this enabled: account exits must be safe even in a tour build.
     vi.stubEnv('VITE_FERN_DEMO', '1')
+    state.pendingCleanups = []
     state.accounts = [real('real-a'), real('real-b')]
     state.rooms = []
     state.messages = {}
@@ -15,9 +16,9 @@ describe('real-account exits never enter the tour', () => {
     state.activeRoomId = ''
     state.lastRoom = {}
     state.thread = undefined
-    vi.spyOn(engine, 'logout').mockResolvedValue({ serverRevoked: true })
-    vi.spyOn(engine, 'removeAccount').mockResolvedValue(undefined)
-    vi.spyOn(engine, 'deactivate').mockResolvedValue(undefined)
+    vi.spyOn(engine, 'logout').mockResolvedValue({ status: 'complete', serverRevoked: true })
+    vi.spyOn(engine, 'removeAccount').mockResolvedValue({ status: 'complete' })
+    vi.spyOn(engine, 'deactivate').mockResolvedValue({ status: 'complete' })
   })
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
@@ -71,7 +72,7 @@ describe('real-account exits never enter the tour', () => {
     await removeAccount('real-a')
     expect(state.activeAccountId).toBe('real-a')
     expect(state.accounts.map(item => item.id)).toEqual(['real-a', 'real-b'])
-    expect(state.error).toBe('Removal failed')
+    expect(state.error).toBe('The operation could not be completed. Check your connection and account details before trying again.')
   })
 
   it('retires every demo identity and reseeds idempotently only when asked', () => {

@@ -435,10 +435,18 @@
     "signoutAction": "Sign out and erase local data",
     "removeAction": "Erase local session data",
     "errors": {
-      "failed": "Local cleanup did not finish. The server session may already be revoked. Retry removal from this device; do not assume all local data was erased.",
+      "failed": "The operation could not be completed. Check your connection and account details before trying again.",
       "missing": "This session is no longer available. Cancel to return to Fern."
     },
     "localSession": "Local session: {id}",
-    "nativeWarning": "Close every other Fern window and app instance before continuing. Removal cannot verify erasure across other running native instances."
+    "nativeWarning": "Close every other Fern window and app instance before continuing. Removal cannot verify erasure across other running native instances.",
+    "cleanupTitle": "Local cleanup unfinished",
+    "restartRequired": "Some local databases are still open. Local erasure is not complete. Close other Fern windows, then restart Fern to finish cleanup. If another window still blocks deletion, this notice will remain.",
+    "cleanupError": "Local cleanup failed. The server session may already be revoked or the account deactivated. Do not assume local data was erased. Retry local cleanup before restarting; this will not repeat sign-out or deactivation.",
+    "restart": "Restart Fern to finish cleanup",
+    "retryLocal": "Retry local cleanup",
+    "serverStillActive": "The server session may still be active.",
+    "close": "Close",
+    "draftStorageError": "A draft could not be saved or loaded. Check browser storage and try again before restarting."
   }
 }

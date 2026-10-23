@@ -2,6 +2,7 @@ import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterfac
 import type { OAuthAuthorizationDataInterface } from './generated/matrix_sdk'
 import type { Account, Room, Message, Member, DirectoryRoom, SpaceChild } from '../types'
 import type { ExitRecoveryStatus } from '../session-exit'
+import { isSessionRemoving as isRemovingSession, markSessionRemoving, routingStorageLock, deleteSessionDrafts } from '../session-storage'
 import type { RoomNotificationMode } from './generated/matrix_sdk_ffi'
 import { applyDiffs } from '../diff'
 import { extractMentions, markdownToHtml, stripReplyFallback } from '../format'
@@ -93,23 +94,23 @@ function savedAccounts(): Record<string, SessionRecord> {
 }
 async function adoptLegacySecrets(secrets: [string, SessionSecrets][]): Promise<void> {
   for (const [storeId, entry] of secrets) {
-    if (cachedSecrets(storeId)) continue
-    try { await persistSession(storeId, entry) }
-    catch { continue }
-    if (isRemovingSession(storeId)) continue
-    const raw = readSessionRecords()
-    const record = splitLegacyRecords({ [storeId]: raw[storeId] }).records[storeId]
-    if (record) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...raw, [storeId]: record }))
+    if (!cachedSecrets(storeId)) {
+      try { await persistSession(storeId, entry) }
+      catch { continue }
+    }
+    try {
+      await routingStorageLock(false, () => {
+        if (isRemovingSession(storeId)) return
+        const raw = readSessionRecords()
+        const record = splitLegacyRecords({ [storeId]: raw[storeId] }).records[storeId]
+        if (record) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...raw, [storeId]: record }))
+      })
+    } catch { /* Keep the legacy record for a later migration attempt. */ }
   }
 }
 // A cleanup tombstone is independent of routing metadata so a partial
 // deletion remains retryable but cannot restore or refresh this session.
-const removingSessions = new Set<string>()
 const sessionWrites = new Map<string, Set<Promise<void>>>()
-const removalKey = (id: string) => `fern.removing.${id}`
-function isRemovingSession(id: string): boolean {
-  return removingSessions.has(id) || localStorage.getItem(removalKey(id)) === '1'
-}
 function persistSession(id: string, secrets: SessionSecrets): Promise<void> {
   if (isRemovingSession(id)) return Promise.reject(new Error('This session is being removed from this device.'))
   const pending = persistSecrets(id, secrets)
@@ -130,18 +131,17 @@ async function drainSessionWrites(id: string): Promise<void> {
     ])
   } finally { if (timer !== undefined) clearTimeout(timer) }
 }
-function saveRecord(id: string, record: SessionRecord) {
-  if (isRemovingSession(id)) return
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readSessionRecords(), [id]: record }))
+function saveRecord(id: string, record: SessionRecord): Promise<void> {
+  return routingStorageLock(false, () => {
+    if (isRemovingSession(id)) return
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readSessionRecords(), [id]: record }))
+  })
 }
 async function commitSession(storeId: string, secrets: SessionSecrets): Promise<Session> {
   await persistSession(storeId, secrets)
-  saveRecord(storeId, { userId: secrets.session.userId, homeserverUrl: secrets.session.homeserverUrl })
+  await saveRecord(storeId, { userId: secrets.session.userId, homeserverUrl: secrets.session.homeserverUrl })
   return secrets.session
 }
-// App.vue persists per-room drafts under this prefix; the engine owns erasing
-// them because account removal must not leave another account's input behind.
-const draftPrefix = (id: string) => `fern.draft.${id}/`
 // Deletes the databases the SDK spreads one account across. Used by removal
 // and by abandoned login attempts so failed starts leave no orphaned stores.
 function dropTempStore(storeId: string): Promise<void> {
@@ -180,6 +180,7 @@ function deleteExitDatabase(name: string): Promise<void> {
     } catch { finish(new Error('Database deletion could not start')) }
   })
 }
+export type LocalCleanupResult = { status: 'complete' } | { status: 'restart-required' }
 export type CleanupStage = 'tombstone' | 'sync-stop' | 'cancel-handles' | 'detach-verification' | 'secret-write-drain' | 'secret-delete' | 'drafts' | 'media-urls' | 'database-app' | 'database-crypto' | 'database-state' | 'routing'
 export class LocalCleanupError extends Error {
   constructor(readonly failures: unknown[], readonly stages: CleanupStage[] = []) {
@@ -191,6 +192,7 @@ export interface EngineEvents {
   account(account: Account): void
   rooms(accountId: string, rooms: Room[]): void
   error(accountId: string, message: string): void
+  cleanupPending?(account: Account, message: string, status: 'restart-required' | 'error'): void
 }
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -259,8 +261,18 @@ export class MatrixEngine {
   // removed: stale attaches must stop their own sync instead of registering it.
   private attachTokens = new Map<string, number>()
   private alive = true
-  constructor(private events: EngineEvents) {}
+  private events: EngineEvents
+  constructor(events: EngineEvents) {
+    // Late SDK callbacks must not resurrect a removed session in any view.
+    this.events = {
+      account: value => { if (!isRemovingSession(value.id)) events.account(value) },
+      rooms: (id, rooms) => { if (!isRemovingSession(id)) events.rooms(id, rooms) },
+      error: (id, message) => { if (!isRemovingSession(id)) events.error(id, message) },
+      cleanupPending: events.cleanupPending,
+    }
+  }
   getClient(id: string) {
+    if (isRemovingSession(id)) throw new Error('This session is being removed from this device.')
     const client = this.clients.get(id)
     if (!client) throw new Error('This account is not connected. Sign in or retry the connection.')
     return client
@@ -303,7 +315,8 @@ export class MatrixEngine {
             // keychain write surfaces instead of silently losing the rotation.
             persistSession(data.storeId, { session, passphrase: data.passphrase })
               .catch(error => { this.events.error(data.storeId, `Saving the refreshed session failed (${errorText(error)}). Sign in again if sync stops.`) })
-            saveRecord(data.storeId, { userId: session.userId, homeserverUrl: session.homeserverUrl })
+            void saveRecord(data.storeId, { userId: session.userId, homeserverUrl: session.homeserverUrl })
+              .catch(() => this.events.error(data.storeId, 'Saving the session routing record failed.'))
           }
         },
       })
@@ -484,13 +497,23 @@ export class MatrixEngine {
     const entries = Object.entries(savedAccounts())
     await Promise.allSettled(entries.map(async ([id, record]) => {
       const account: Account = { id, userId: record.userId, name: record.userId.split(':')[0].slice(1), color: '#477962', connection: 'connecting' }
+      if (isRemovingSession(id)) {
+        // Resume local erasure only. Never repeat logout/deactivation or build
+        // a target SDK client before its pending stores have been removed.
+        try {
+          const cleanup = await this.eraseLocal(id)
+          if (cleanup.status === 'restart-required') this.events.cleanupPending?.(account, 'Close other Fern windows and restart to finish removing local data.', 'restart-required')
+        } catch (error) { this.events.cleanupPending?.(account, errorText(error), 'error') }
+        return
+      }
       this.events.account(account)
       try {
-        if (isRemovingSession(id)) throw new Error('Local cleanup is incomplete. Remove this session from this device again.')
         const secrets = cachedSecrets(id) ?? await loadSecrets(id)
         if (!secrets) throw new Error('The saved session secret is missing on this device. Sign in again.')
         const sdk = await loadSdk()
+        if (isRemovingSession(id)) return
         const client = await (await this.builder({ storeId: id, passphrase: secrets.passphrase }, false)).homeserverUrl(record.homeserverUrl).build()
+        if (isRemovingSession(id)) return
         await client.restoreSession(sdk.Session.new(secrets.session))
         await this.attach(client, id)
       } catch (error) { this.events.account({ ...account, connection: 'error', error: errorText(error) }); this.events.error(id, errorText(error)) }
@@ -557,12 +580,13 @@ export class MatrixEngine {
       }
       this.events.account({ ...account, connection: 'connecting' })
     } }))
-    const delegate = client.setDelegate({ didReceiveAuthError: () => this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' }) })
+    const delegate = client.setDelegate({ didReceiveAuthError: () => { if (current()) this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' }) } })
     if (delegate) handles.push(delegate)
     const allRooms = await sync.roomListService().allRooms()
+    if (!current()) return
     let setup = false
     const setupEntries = () => {
-      if (setup || !this.alive) return
+      if (setup || !current()) return
       setup = true
       const entries = allRooms.entriesWithDynamicAdapters(200, { onUpdate: () => void this.refreshRooms(id) })
       this.roomLists.set(id, entries)
@@ -581,21 +605,22 @@ export class MatrixEngine {
     // Room-list poll with exponential backoff while failing, so a dead server
     // does not spin hot and recovery is picked up within a bounded delay.
     const poll = () => {
-      if (!this.alive || !this.clients.has(id)) return
+      if (!current()) return
       // Reachability first (it owns the offline detector), then the local
       // room-list refresh; neither step rejects.
       void this.pingServer(id).then(() => this.refreshRooms(id)).finally(() => {
-        if (!this.alive || !this.clients.has(id)) return
+        if (!current()) return
         this.timers.set(id, setTimeout(poll, pollDelay(this.refreshFailures.get(id) ?? 0)))
       })
     }
     this.timers.set(id, setTimeout(poll, 4000))
     try { account.name = await client.displayName() } catch { /* MXID fallback */ }
+    if (!current()) return
     this.events.account({ ...account, connection: 'online' })
     await this.refreshRooms(id)
   }
   async refreshRooms(accountId: string) {
-    if (!this.alive || this.refreshes.has(accountId)) return
+    if (!this.alive || isRemovingSession(accountId) || this.refreshes.has(accountId)) return
     this.refreshes.add(accountId)
     try {
       const sdk = await loadSdk()
@@ -606,9 +631,11 @@ export class MatrixEngine {
       for (let offset = 0; offset < sdkRooms.length; offset += 20) {
         const batch = await Promise.allSettled(sdkRooms.slice(offset, offset + 20).map(async room => {
           const [info, latest, parents] = await Promise.all([room.roomInfo(), room.latestEvent(), client.spaceService().joinedParentsOfChild(room.id()).catch(() => [])])
+          if (isRemovingSession(accountId)) throw new Error('Session removed.')
           const preview = latest ? this.parseEvent(accountId, room.id(), latest) : undefined
           return { id: info.id, accountId, name: info.displayName ?? info.id, topic: info.topic ?? '', direct: info.isDirect, space: info.isSpace, encrypted: info.encryptionState === sdk.EncryptionState.Encrypted, favorite: info.isFavourite, unread: Number(info.numUnreadNotifications), mentions: Number(info.numUnreadMentions), members: Number(info.activeMembersCount), preview: preview?.body ?? '', timestamp: preview?.timestamp ?? 0, parents: parents.map(parent => parent.roomId), membership: info.membership === sdk.Membership.Invited ? 'invited' : info.membership === sdk.Membership.Left ? 'left' : 'joined', successor: info.successorRoom?.roomId } satisfies Room
         }))
+        if (!this.alive || isRemovingSession(accountId)) return
         for (const value of batch) if (value.status === 'fulfilled') rooms.push(value.value)
       }
       if (this.alive && this.clients.has(accountId)) this.events.rooms(accountId, rooms)
@@ -616,6 +643,7 @@ export class MatrixEngine {
     finally { this.refreshes.delete(accountId) }
   }
   private noteRefreshSuccess(accountId: string) {
+    if (isRemovingSession(accountId)) return
     this.refreshFailures.set(accountId, 0)
     if (this.refreshMarkedOffline.delete(accountId)) {
       const userId = this.clients.get(accountId)?.userId()
@@ -623,6 +651,7 @@ export class MatrixEngine {
     }
   }
   private noteRefreshFailure(accountId: string, error: unknown) {
+    if (isRemovingSession(accountId)) return
     const failures = (this.refreshFailures.get(accountId) ?? 0) + 1
     this.refreshFailures.set(accountId, failures)
     if (isAuthFailure(error)) {
@@ -671,6 +700,7 @@ export class MatrixEngine {
     } else this.markOffline(accountId)
   }
   private parseEvent(accountId: string, roomId: string, event: EventTimelineItem): Message {
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const identity = event.eventOrTransactionId
     const id = identity.tag === 'EventId' ? identity.inner.eventId : identity.inner.transactionId
     const cacheKey = `${accountId}/${roomId}/${id}`
@@ -752,15 +782,18 @@ export class MatrixEngine {
     const room = this.getRoom(accountId, roomId)
     await this.syncs.get(accountId)?.roomListService().subscribeToRooms([roomId])
     const timeline = await room.timeline()
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.timelineCache.set(key, timeline)
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
-    const typing = room.subscribeToTypingNotifications({ call: users => onTyping(users.filter(user => user !== room.ownUserId())) })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
+    const typing = room.subscribeToTypingNotifications({ call: users => { if (!isRemovingSession(accountId)) onTyping(users.filter(user => user !== room.ownUserId())) } })
     // Drop this watch's timeline object so rapid room switches cannot
     // accumulate native timelines. The identity check keeps a stale stop from
     // evicting a newer watch's timeline; send/paginate recreate lazily.
@@ -771,9 +804,11 @@ export class MatrixEngine {
   }
   private async timeline(accountId: string, roomId: string) {
     const key = `${accountId}/${roomId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.timelineCache.get(key)
     if (cached) return cached
     const timeline = await this.getRoom(accountId, roomId).timeline()
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.timelineCache.set(key, timeline)
     return timeline
   }
@@ -813,6 +848,7 @@ export class MatrixEngine {
   private threadTimelines = new Map<string, TimelineInterface>()
   async threadTimeline(accountId: string, roomId: string, rootId: string) {
     const key = `${accountId}/${roomId}/${rootId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.threadTimelines.get(key)
     if (cached) return cached
     const sdk = await loadSdk()
@@ -821,6 +857,7 @@ export class MatrixEngine {
       filter: new sdk.TimelineFilter.All(), internalIdPrefix: undefined,
       dateDividerMode: sdk.DateDividerMode.Daily, trackReadReceipts: true, reportUtds: false,
     })
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.threadTimelines.set(key, timeline)
     return timeline
   }
@@ -836,11 +873,13 @@ export class MatrixEngine {
     })
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
     return () => handle.cancel()
   }
   // Best-effort preview of one pinned event: the focused message when the
@@ -901,11 +940,13 @@ export class MatrixEngine {
     const timeline = await this.threadTimeline(accountId, roomId, rootId)
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
     return () => handle.cancel()
   }
   async paginateThread(accountId: string, roomId: string, rootId: string) { return (await this.threadTimeline(accountId, roomId, rootId)).paginateBackwards(40) }
@@ -1038,11 +1079,13 @@ export class MatrixEngine {
   }
   async download(accountId: string, roomId: string, message: Message) {
     const key = `${accountId}/${roomId}/${message.id}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.objectUrls.get(key)
     if (cached) return cached
     const source = this.media.get(key)
     if (!source) throw new Error('This attachment has not finished syncing.')
     const bytes = await this.getClient(accountId).getMediaContent(source)
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: safeMediaMime(message.attachment?.mime) }))
     this.objectUrls.set(key, url)
     return url
@@ -1053,11 +1096,13 @@ export class MatrixEngine {
   async profileAvatar(accountId: string, userId: string): Promise<string | undefined> {
     const sdk = await loadSdk()
     const key = `${accountId}/avatar/${userId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.objectUrls.get(key)
     if (cached) return cached
     const profile = await this.getClient(accountId).getProfile(userId)
     if (!profile.avatarUrl) return undefined
     const bytes = await this.getClient(accountId).getMediaContent(sdk.MediaSource.fromUrl(profile.avatarUrl))
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
     this.objectUrls.set(key, url)
     return url
@@ -1513,13 +1558,17 @@ export class MatrixEngine {
     return encryption.enableRecovery(true, undefined, { onUpdate: status => progress(status.tag) })
   }
   private verificationDelegate(accountId: string, controller: SessionVerificationControllerInterface, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }) => void) {
+    if (isRemovingSession(accountId)) { controller.setDelegate(undefined); throw new Error('Session removed.') }
+    const notify = update
+    update = value => { if (!isRemovingSession(accountId)) notify(value) }
     this.verificationControllers.set(accountId, controller)
     controller.setDelegate({
       didReceiveVerificationRequest: details => {
+        if (isRemovingSession(accountId)) return
         this.pendingVerifications.set(accountId, details)
         update({ status: 'incoming', deviceName: details.deviceDisplayName ?? details.senderProfile.displayName ?? details.deviceId })
       },
-      didAcceptVerificationRequest: () => { update({ status: 'accepted' }); void controller.startSasVerification().catch(error => this.events.error(accountId, errorText(error))) },
+      didAcceptVerificationRequest: () => { if (isRemovingSession(accountId)) return; update({ status: 'accepted' }); void controller.startSasVerification().catch(error => this.events.error(accountId, errorText(error))) },
       didStartSasVerification: () => update({ status: 'comparing' }),
       didReceiveVerificationData: data => {
         if (data.tag === 'Emojis') update({ status: 'compare', emojis: data.inner.emojis.map(emoji => ({ symbol: emoji.symbol(), description: emoji.description() })) })
@@ -1565,16 +1614,16 @@ export class MatrixEngine {
   // Sign out: revoke the server session when reachable, then always erase the
   // local account. Local erasure never throws for server failures, so a dead
   // network cannot strand credentials on this device.
-  async logout(accountId: string): Promise<{ serverRevoked: boolean }> {
+  async logout(accountId: string): Promise<LocalCleanupResult & { serverRevoked: boolean }> {
     let serverRevoked = false
     try { await this.getClient(accountId).logout(); serverRevoked = true } catch { serverRevoked = false }
-    await this.eraseLocal(accountId)
-    return { serverRevoked }
+    const cleanup = await this.eraseLocal(accountId)
+    return { ...cleanup, serverRevoked }
   }
   // Remove a local account without contacting the server, for sessions that
   // are already invalid or unreachable. Idempotent: unknown ids resolve.
-  async removeAccount(accountId: string) {
-    await this.eraseLocal(accountId)
+  async removeAccount(accountId: string): Promise<LocalCleanupResult> {
+    return this.eraseLocal(accountId)
   }
   // ---- Account registration, credentials and deactivation (#39) ----
   // First-party account REST over the saved session token. The SDK owns
@@ -1724,7 +1773,7 @@ export class MatrixEngine {
   // Irreversible server-side deactivation with password UIAA, then the same
   // isolated local erasure as sign-out. Callers confirm twice: the UI gates
   // on an explicit acknowledgment and the last-device warning.
-  async deactivate(accountId: string, password: string, erase: boolean): Promise<void> {
+  async deactivate(accountId: string, password: string, erase: boolean): Promise<LocalCleanupResult> {
     const sdk = await loadSdk()
     const userId = this.sessionOf(accountId).userId
     try {
@@ -1744,9 +1793,9 @@ export class MatrixEngine {
         throw error
       }
     }
-    await this.eraseLocal(accountId)
+    return this.eraseLocal(accountId)
   }
-  private async eraseLocal(accountId: string) {
+  private async eraseLocal(accountId: string): Promise<LocalCleanupResult> {
     // Keep the public routing record until every deletion succeeds. A failed
     // secret or database deletion must remain addressable after retry/reload.
     const failures: unknown[] = []
@@ -1754,8 +1803,7 @@ export class MatrixEngine {
     const attempt = async (stage: CleanupStage, work: () => unknown | Promise<unknown>) => {
       try { await work() } catch (error) { failures.push(error); stages.push(stage) }
     }
-    removingSessions.add(accountId)
-    await attempt('tombstone', () => localStorage.setItem(removalKey(accountId), '1'))
+    await attempt('tombstone', () => markSessionRemoving(accountId))
     this.attachTokens.set(accountId, (this.attachTokens.get(accountId) ?? 0) + 1)
     await attempt('sync-stop', () => this.syncs.get(accountId)?.stop())
     for (const handle of this.handles.get(accountId) ?? []) await attempt('cancel-handles', () => handle.cancel())
@@ -1773,12 +1821,7 @@ export class MatrixEngine {
     // Never race the final secret delete against an unresolved keychain write.
     // Independent local cleanup still proceeds; tombstone and routing survive.
     if (writesSettled) await attempt('secret-delete', () => dropSecrets(accountId, true))
-    await attempt('drafts', () => {
-      for (let index = localStorage.length - 1; index >= 0; index--) {
-        const key = localStorage.key(index)
-        if (key?.startsWith(draftPrefix(accountId))) localStorage.removeItem(key)
-      }
-    })
+    await attempt('drafts', () => deleteSessionDrafts(accountId))
     for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) {
       await attempt('media-urls', () => URL.revokeObjectURL(url)); this.objectUrls.delete(key)
     }
@@ -1788,11 +1831,13 @@ export class MatrixEngine {
     await Promise.all(([
       ['', 'database-app'], ['::matrix-sdk-crypto', 'database-crypto'], ['::matrix-sdk-state', 'database-state'],
     ] as const).map(([suffix, stage]) => attempt(stage, () => deleteExitDatabase(`fern-${accountId}${suffix}`))))
-    if (!failures.length) await attempt('routing', () => {
+    if (!failures.length) await attempt('routing', () => routingStorageLock(true, () => {
       const entries = readSessionRecords(); delete entries[accountId]
       localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
-    })
+    }))
+    if (stages.length && stages.every(stage => stage.startsWith('database-'))) return { status: 'restart-required' }
     if (failures.length) throw new LocalCleanupError(failures, stages)
+    return { status: 'complete' }
   }
   async dispose() {
     this.alive = false

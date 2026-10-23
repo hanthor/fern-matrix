@@ -10,7 +10,9 @@ import { clearSecretsCache, readAllSecrets, writeAllSecrets } from './secrets'
 import type { WidgetInfo } from './widgets'
 import type { KnockRequest } from './knock'
 import { decodeQrLoginBytes } from './qr'
-import type { QrProgress } from './sdk/engine'
+import type { ExitOutcome } from './session-exit'
+import { isSessionRemoving } from './session-storage'
+import type { QrProgress, LocalCleanupResult } from './sdk/engine'
 import { version as appVersion } from '../package.json'
 import type { Account, Room, Message, Member, SpaceChild } from './types'
 import type { NotifyMode } from './sdk/engine'
@@ -26,7 +28,7 @@ export function setMapProvider(value: MapProvider) {
   mapProvider.value = value
   try { localStorage.setItem('fern.maps', value) } catch { /* non-browser */ }
 }
-import { MatrixEngine } from './sdk/engine'
+import { MatrixEngine, LocalCleanupError } from './sdk/engine'
 const demoKey = 'fern.demo.v1'
 function readDemo(): { rooms?: Room[]; messages?: Record<string, Message[]> } {
   try { return JSON.parse(localStorage.getItem(demoKey) ?? '{}') } catch { return {} }
@@ -49,7 +51,14 @@ export function demoEnabled(): boolean {
 }
 const demoSeeded = demoEnabled()
 const saved: { rooms?: Room[]; messages?: Record<string, Message[]> } = demoSeeded ? readDemo() : {}
+export interface PendingCleanup {
+  account: Account
+  status: 'restart-required' | 'error'
+  serverRevoked?: boolean
+  busy: boolean
+}
 export const state = reactive({
+  pendingCleanups: [] as PendingCleanup[],
   accounts: demoSeeded ? structuredClone(demoAccounts) : [] as Account[],
   rooms: demoSeeded ? (saved.rooms ?? structuredClone(demoRooms)) : [] as Room[],
   messages: demoSeeded ? (saved.messages ?? {}) : {} as Record<string, Message[]>,
@@ -344,6 +353,10 @@ export async function action<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try { return await fn() } catch (error) { state.error = error instanceof Error ? error.message : String(error); return undefined }
 }
 export const engine = new MatrixEngine({
+  cleanupPending(value, _message, status) {
+    rememberCleanup(value, status)
+    clearAccountState(value.id)
+  },
   account(value) {
     const index = state.accounts.findIndex(item => item.id === value.id)
     if (index >= 0) state.accounts[index] = value
@@ -1052,45 +1065,75 @@ function selectAfterAccountExit() {
   const next = state.accounts.find(item => item.id === state.activeAccountId) ?? state.accounts[0]
   switchAccount(next?.id ?? '')
 }
-// Shared between sign-out and local removal so repeated clicks cannot race.
+// All cleanup retries are local-only. A completed remote operation is never
+// repeated, even if credentials, draft deletion or database cleanup failed.
 const exitingAccounts = new Set<string>()
-export async function signOut(id = state.activeAccountId): Promise<boolean> {
-  const target = state.accounts.find(value => value.id === id)
-  if (!target || target.connection === 'demo' || exitingAccounts.has(id)) return false
+function rememberCleanup(target: Account, status: PendingCleanup['status'], serverRevoked?: boolean) {
+  const previous = state.pendingCleanups.find(item => item.account.id === target.id)
+  const entry: PendingCleanup = {
+    account: { ...target }, status, busy: false,
+    serverRevoked: serverRevoked ?? previous?.serverRevoked,
+  }
+  if (previous) Object.assign(previous, entry)
+  else state.pendingCleanups.push(entry)
+}
+async function finishSessionExit(
+  target: Account,
+  work: () => Promise<LocalCleanupResult & { serverRevoked?: boolean }>,
+  success: string,
+): Promise<ExitOutcome> {
+  const id = target.id
+  if (exitingAccounts.has(id)) return { status: 'error', cleanupStarted: false }
   exitingAccounts.add(id)
+  state.error = ''
   try {
-    return await action(async () => {
-      // The confirmation captures a session id; switching accounts while the
-      // server responds must not change which session gets revoked.
-      const result = await engine.logout(id)
+    const result = await work()
+    if (result.status === 'restart-required') rememberCleanup(target, result.status, result.serverRevoked)
+    else state.pendingCleanups = state.pendingCleanups.filter(item => item.account.id !== id)
+    clearAccountState(id)
+    selectAfterAccountExit()
+    if (result.status === 'complete') notify(result.serverRevoked === false
+      ? 'Signed out on this device. The server session may still be active.'
+      : success)
+    return result
+  } catch (error) {
+    let cleanupStarted = error instanceof LocalCleanupError
+    try { cleanupStarted ||= isSessionRemoving(id) } catch { /* The typed cleanup error still identifies an in-memory tombstone. */ }
+    if (cleanupStarted) {
+      rememberCleanup(target, 'error')
       clearAccountState(id)
       selectAfterAccountExit()
-      notify(result?.serverRevoked === false
-        ? 'Signed out on this device. The server session may still be active.'
-        : 'Signed out of this account')
-      return true
-    }) ?? false
+      state.error = 'Local cleanup did not finish. Retry local cleanup; do not assume all local data was erased.'
+    } else state.error = 'The operation could not be completed. Check your connection and account details before trying again.'
+    return { status: 'error', cleanupStarted }
   } finally { exitingAccounts.delete(id) }
+}
+export async function signOut(id = state.activeAccountId): Promise<ExitOutcome> {
+  const target = state.accounts.find(value => value.id === id)
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === id))
+    return { status: 'error', cleanupStarted: false }
+  return finishSessionExit({ ...target }, () => engine.logout(id), 'Signed out of this account')
 }
 export function retryConnection(id: string) {
-  // Manual re-probe for an offline or errored account: resets the backoff and
-  // polls immediately instead of waiting for the next scheduled tick.
   return action(() => engine.retryConnection(id))
 }
-export async function removeAccount(id: string): Promise<boolean> {
+export async function removeAccount(id: string): Promise<ExitOutcome> {
   const target = state.accounts.find(value => value.id === id)
-  if (!target || target.connection === 'demo' || exitingAccounts.has(id)) return false
-  exitingAccounts.add(id)
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === id))
+    return { status: 'error', cleanupStarted: false }
+  return finishSessionExit({ ...target }, () => engine.removeAccount(id), 'Removed this account from this device')
+}
+export async function retryPendingCleanup(id: string): Promise<ExitOutcome> {
+  const pending = state.pendingCleanups.find(item => item.account.id === id)
+  if (!pending || pending.busy || appLocked.value) return { status: 'error', cleanupStarted: false }
+  pending.busy = true
   try {
-    return await action(async () => {
-      // Local-only removal deliberately does not revoke the server session.
-      await engine.removeAccount(id)
-      clearAccountState(id)
-      selectAfterAccountExit()
-      notify('Removed this account from this device')
-      return true
-    }) ?? false
-  } finally { exitingAccounts.delete(id) }
+    // Deliberately never call logout or deactivate on this path.
+    const result = await finishSessionExit({ ...pending.account }, () => engine.removeAccount(id), 'Local cleanup completed')
+    if (result.status !== 'error' && pending.serverRevoked !== undefined)
+      return { ...result, serverRevoked: pending.serverRevoked }
+    return result
+  } finally { pending.busy = false }
 }
 function clearAccountState(id: string) {
   if (state.thread?.accountId === id) closeThread()
@@ -1124,6 +1167,7 @@ export async function initialize() {
     switchAccount(selected.id)
     retireDemo()
   }
+  if (!selected && state.pendingCleanups.length) selectAfterAccountExit()
   // switchAccount clears view errors; preserve restoration failures explicitly.
   state.error = restoreError || selected?.error || state.error
 }
@@ -1283,15 +1327,12 @@ export async function prepareDeactivate() {
 }
 // Deactivation is irreversible server-side: the UI confirms twice (an
 // explicit acknowledgment plus the last-device warning) before calling in.
-export async function deactivateAccount(password: string, erase: boolean) {
-  const id = state.activeAccountId
-  if (isDemo.value) { notify('The demo account cannot be deactivated.'); return false }
-  await action(() => engine.deactivate(id, password, erase))
-  if (state.error) return false
-  clearAccountState(id)
-  selectAfterAccountExit()
-  notify('Account deactivated')
-  return true
+export async function deactivateAccount(password: string, erase: boolean): Promise<ExitOutcome> {
+  const target = account.value
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === target.id))
+    return { status: 'error', cleanupStarted: false }
+  const captured = { ...target }
+  return finishSessionExit(captured, () => engine.deactivate(captured.id, password, erase), 'Account deactivated')
 }
 export interface RoomSettings { roomId: string; name: string; topic: string; avatar: string; historyVisibility: string; joinRule: string; encrypted: boolean; space: boolean; power: { users: Record<string, number>; usersDefault: number; stateDefault: number; eventsDefault: number; ban: number; kick: number; redact: number; invite: number } | null; permissions: { own: number; state: boolean; ban: boolean; kick: boolean; invite: boolean }; members: Member[]; children: SpaceChild[]; canOrganize: boolean }
 export const roomSettings = ref<RoomSettings | null>(null)

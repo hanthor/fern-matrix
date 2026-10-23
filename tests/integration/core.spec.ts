@@ -1,5 +1,6 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { finishLocalCleanup } from './cleanup'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { MatrixEngine } from '../../src/sdk/engine'
@@ -145,10 +146,15 @@ test('live password login, simultaneous account isolation, restoration and logou
   await boot(page)
   await page.evaluate(() => window.matrixTest.engine.restoreAll())
   await expect.poll(() => page.evaluate(() => Object.values(window.matrixTest.accounts).filter(a => a.connection === 'online').length)).toBe(2)
-  await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+  const aExit = await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+  expect(aExit.serverRevoked).toBe(true)
+  expect(['complete', 'restart-required']).toContain(aExit.status)
+  await finishLocalCleanup(page, a, boot)
   expect(await page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('fern.sessions.v1')!)))).toEqual([b])
   expect(await page.evaluate(b => window.matrixTest.engine.getClient(b).userId(), b)).toBe(bob.userId)
-  await page.evaluate(b => window.matrixTest.engine.logout(b), b)
+  const bExit = await page.evaluate(b => window.matrixTest.engine.logout(b), b)
+  expect(bExit.serverRevoked).toBe(true)
+  await finishLocalCleanup(page, b, boot)
   await page.evaluate(() => window.matrixTest.engine.dispose())
 })
 
@@ -188,19 +194,6 @@ test('removing one account erases only its data and blocks stale restore', async
   const context = await browser.newContext()
   const pa = await context.newPage()
   const databases = (page: Page) => page.evaluate(async () => (await indexedDB.databases()).map(db => db.name))
-  // The SDK's IndexedDB connections die with their page, so database unlinks
-  // are observed from a second page sharing this context's storage. Re-issuing
-  // a delete is idempotent: it only hurries what removal already requested.
-  async function expectUnlinked(page: Page, id: string) {
-    for (const suffix of ['', '::matrix-sdk-crypto', '::matrix-sdk-state']) {
-      await page.evaluate(name => new Promise<void>(resolve => {
-        const request = indexedDB.deleteDatabase(name)
-        request.onsuccess = request.onerror = request.onblocked = () => resolve()
-      }), `fern-${id}${suffix}`)
-    }
-    await expect.poll(() => page.evaluate(async (wanted: string) =>
-      (await indexedDB.databases()).every(db => !db.name?.includes(wanted)), id)).toBe(true)
-  }
   await boot(pa)
   const a = await login(pa, alice)
   const b = await login(pa, bob)
@@ -212,11 +205,11 @@ test('removing one account erases only its data and blocks stale restore', async
   }, [a, b])
   expect((await databases(pa)).some(name => name?.includes(a))).toBe(true)
   expect((await databases(pa)).some(name => name?.includes(b))).toBe(true)
-  // Local-only removal contacts no server and is idempotent. Credentials,
-  // drafts and handles are erased synchronously.
-  await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
-  await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
-  expect(Object.keys(JSON.parse(await pa.evaluate(() => localStorage.getItem('fern.sessions.v1')!)))).toEqual([b])
+  // Local-only removal stops access now; open WASM stores explicitly require
+  // a restart rather than falsely announcing completed physical erasure.
+  const removal = await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
+  expect(removal).toEqual({ status: 'restart-required' })
+  expect(Object.keys(JSON.parse(await pa.evaluate(() => localStorage.getItem('fern.sessions.v1')!))).sort()).toEqual([a, b].sort())
   expect(await pa.evaluate(a => localStorage.getItem(`fern.draft.${a}/!room:x`), a)).toBeNull()
   expect(await pa.evaluate(b => localStorage.getItem(`fern.draft.${b}/!room:x`), b)).toBe('unsent words B')
   await expect.poll(() => pa.evaluate(async id => {
@@ -225,18 +218,17 @@ test('removing one account erases only its data and blocks stale restore', async
   const pb = await context.newPage()
   await boot(pb)
   await pa.close()
-  await expectUnlinked(pb, a)
+  await finishLocalCleanup(pb, a, boot)
   expect((await databases(pb)).some(name => name?.includes(b))).toBe(true)
   // A fresh engine restoring from the remaining sessions never resurrects
   // the removed account: its credentials are gone, so the keychain delegate
   // cannot supply a session for it.
-  await pb.evaluate(() => window.matrixTest.engine.restoreAll())
   await expect.poll(() => pb.evaluate(() => Object.values(window.matrixTest.accounts).filter(account => account.connection === 'online').length)).toBe(1)
   expect(await pb.evaluate(() => Object.values(window.matrixTest.accounts).map(account => account.userId))).toEqual([bob.userId])
   // Sign-out revokes the server session and erases the local account too.
   const revoked = await pb.evaluate(b => window.matrixTest.engine.logout(b), b)
   expect(revoked.serverRevoked).toBe(true)
-  expect(Object.keys(JSON.parse(await pb.evaluate(() => localStorage.getItem('fern.sessions.v1') ?? '{}')))).toEqual([])
+  expect(['complete', 'restart-required']).toContain(revoked.status)
   expect(await pb.evaluate(b => localStorage.getItem(`fern.draft.${b}/!room:x`), b)).toBeNull()
   await expect.poll(() => pb.evaluate(async id => {
     try { window.matrixTest.engine.getClient(id); return false } catch { return true }
@@ -244,7 +236,7 @@ test('removing one account erases only its data and blocks stale restore', async
   const pc = await context.newPage()
   await boot(pc)
   await pb.close()
-  await expectUnlinked(pc, b)
+  await finishLocalCleanup(pc, b, boot)
   await pc.evaluate(() => window.matrixTest.engine.dispose())
   await pc.close()
   await context.close()
@@ -914,11 +906,14 @@ test('authenticated avatars, image metadata and media safety use the live server
     }, { a, roomId, message: evil })
     expect(evilType).toBe('application/octet-stream')
     // Blob URLs die with the session that created them.
-    await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+    const cleanup = await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+    expect(cleanup.serverRevoked).toBe(true)
+    expect(['complete', 'restart-required']).toContain(cleanup.status)
     const revoked = await page.evaluate(async url => {
       try { await (await fetch(url!)).arrayBuffer(); return false } catch { return true }
     }, avatarUrl)
     expect(revoked).toBe(true)
+    await finishLocalCleanup(page, a, boot)
   } finally {
     if (nioStarted) await nio.stop().catch(() => {})
     await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
