@@ -52,13 +52,17 @@ test('fern pauses behind auth, follows motion preference and removes listeners o
   await expect(fern).toHaveClass(/is-paused/)
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(fern).not.toHaveClass(/is-paused/)
+  // Let the dialog's leave/focus-restoration lifecycle finish before spoofing
+  // page visibility; otherwise the test interrupts an unrelated modal transition.
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Explore the demo', exact: true })).toBeVisible()
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: true })
     document.dispatchEvent(new Event('visibilitychange'))
   })
   await expect(fern).toHaveClass(/is-paused/)
   await page.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    Reflect.deleteProperty(document, 'hidden')
     document.dispatchEvent(new Event('visibilitychange'))
   })
   await expect(fern).not.toHaveClass(/is-paused/)

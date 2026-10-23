@@ -1,0 +1,64 @@
+name: One-time entry artwork inspection
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/entry-evidence-once.yml']
+permissions: {}
+jobs:
+  inspect:
+    if: github.repository == 'hanthor/fern-matrix' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Read only the pinned signed-out PNG artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(mktemp)"
+          export ARCHIVE
+          trap 'rm -f "$ARCHIVE"' EXIT
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' \
+            --max-time 120 --max-filesize 152129 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -o "$ARCHIVE" \
+            https://api.github.com/repos/hanthor/fern-matrix/actions/artifacts/12475828055/zip
+          unset GH_TOKEN
+          python3 - <<'PY'
+          import base64, hashlib, io, os, re, struct, zipfile
+          from pathlib import Path
+          archive = Path(os.environ["ARCHIVE"]).read_bytes()
+          if len(archive) != 152129 or hashlib.sha256(archive).hexdigest() != "6fd6c3974bd735ba965c95a93761c93e108144aa1c72909cb1d74a12ef7d22d7":
+              raise SystemExit("Pinned archive size or SHA256 mismatch")
+          expected = {(360, 800), (320, 568), (800, 360)}
+          seen = set()
+          with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+              members = bundle.infolist()
+              if len(members) != 3:
+                  raise SystemExit("Expected exactly three signed-out screenshots")
+              for entry in members:
+                  if not re.fullmatch(r"entry-art-entry-stays-[a-zA-Z0-9_-]+/entry-dark\.png", entry.filename):
+                      raise SystemExit("Unexpected artifact member")
+                  if entry.file_size > 1024 * 1024:
+                      raise SystemExit("PNG member exceeds byte bound")
+                  with bundle.open(entry) as source:
+                      png = source.read(1024 * 1024 + 1)
+                  if len(png) > 1024 * 1024 or len(png) < 33 or png[:8] != b"\x89PNG\r\n\x1a\n" or png[8:16] != b"\x00\x00\x00\x0dIHDR":
+                      raise SystemExit("Invalid PNG header")
+                  width, height = struct.unpack("!II", png[16:24])
+                  if (width, height) not in expected or (width, height) in seen:
+                      raise SystemExit("Unexpected or duplicate screenshot dimensions")
+                  seen.add((width, height))
+                  key = f"{width}x{height}"
+                  print(f"FERN_PNG_META {key} {width} {height} {len(png)} {hashlib.sha256(png).hexdigest()}")
+                  encoded = base64.b64encode(png).decode("ascii")
+                  for offset in range(0, len(encoded), 4096):
+                      print(f"FERN_PNG {key} {offset // 4096} " + encoded[offset:offset + 4096])
+          if seen != expected:
+              raise SystemExit("Incomplete screenshot set")
+          print("Pinned signed-out artwork: source head 78df24bd3c8648a0f3ec51b5401224d9438ffc67, run 39894214649, artifact 12475828055.")
+          PY
