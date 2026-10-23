@@ -1,3 +1,4 @@
+import { VisibleReadAcknowledger, type ReadTarget } from './read-acknowledgment'
 import { reactive, computed, watch, ref } from 'vue'
 import { demoAccounts, demoRooms, demoMembers, initialDemoMessages } from './demo'
 import { markdownToHtml } from './format'
@@ -10,7 +11,9 @@ import { clearSecretsCache, readAllSecrets, writeAllSecrets } from './secrets'
 import type { WidgetInfo } from './widgets'
 import type { KnockRequest } from './knock'
 import { decodeQrLoginBytes } from './qr'
-import type { QrProgress } from './sdk/engine'
+import type { ExitOutcome } from './session-exit'
+import { isSessionRemoving } from './session-storage'
+import type { QrProgress, LocalCleanupResult } from './sdk/engine'
 import { version as appVersion } from '../package.json'
 import type { Account, Room, Message, Member, SpaceChild } from './types'
 import type { NotifyMode } from './sdk/engine'
@@ -26,16 +29,14 @@ export function setMapProvider(value: MapProvider) {
   mapProvider.value = value
   try { localStorage.setItem('fern.maps', value) } catch { /* non-browser */ }
 }
-import { MatrixEngine } from './sdk/engine'
+import { MatrixEngine, LocalCleanupError } from './sdk/engine'
 const demoKey = 'fern.demo.v1'
 function readDemo(): { rooms?: Room[]; messages?: Record<string, Message[]> } {
   try { return JSON.parse(localStorage.getItem(demoKey) ?? '{}') } catch { return {} }
 }
-// Demo availability: the local tour ships only on the dedicated demo
-// instance (GitHub Pages sets VITE_FERN_DEMO=1 at build time) or an explicit
-// ?demo=1 override, plus always under unit tests exercising the fixtures.
-// Everywhere else the app starts empty and prompts for login/account
-// creation; ?demo=0 forces the gate even on the demo instance.
+// The public app starts at sign-in. Tours are explicit: Explore the demo,
+// ?demo=1, or a dedicated VITE_FERN_DEMO=1 development/test build.
+// ?demo=0 forces the signed-out gate even on a tour-enabled build.
 export function demoEnabled(): boolean {
   // Explicit URL override wins over the build flag.
   if (typeof location !== 'undefined') {
@@ -51,7 +52,14 @@ export function demoEnabled(): boolean {
 }
 const demoSeeded = demoEnabled()
 const saved: { rooms?: Room[]; messages?: Record<string, Message[]> } = demoSeeded ? readDemo() : {}
+export interface PendingCleanup {
+  account: Account
+  status: 'restart-required' | 'error'
+  serverRevoked?: boolean
+  busy: boolean
+}
 export const state = reactive({
+  pendingCleanups: [] as PendingCleanup[],
   accounts: demoSeeded ? structuredClone(demoAccounts) : [] as Account[],
   rooms: demoSeeded ? (saved.rooms ?? structuredClone(demoRooms)) : [] as Room[],
   messages: demoSeeded ? (saved.messages ?? {}) : {} as Record<string, Message[]>,
@@ -63,7 +71,11 @@ export const state = reactive({
   firstUnread: {} as Record<string, { id: string; count: number }>,
   avatars: {} as Record<string, string>, uploading: false,
   thread: undefined as { accountId: string; roomId: string; rootId: string; root: Message | undefined; messages: Message[]; end: boolean; loading: boolean } | undefined,
+  // Local acknowledged boundary, not a server unread count.
   threadSeen: {} as Record<string, number>,
+  threadReadBoundary: {} as Record<string, string>,
+  threadKnownEvents: {} as Record<string, string[]>,
+  threadAcknowledgedEvents: {} as Record<string, string[]>,
 })
 const avatarInflight = new Map<string, Promise<string | undefined>>()
 export function avatarKey(accountId: string, userId: string) { return `${accountId}/avatar/${userId}` }
@@ -121,69 +133,148 @@ export function downloadDiagnostics() {
   setTimeout(() => URL.revokeObjectURL(link.href), 60_000)
 }
 export const threadKey = (accountId: string, roomId: string, rootId: string) => `${accountId}/${roomId}/${rootId}`
-export function threadUnread(accountId: string, roomId: string, rootId: string, total: number) {
-  return Math.max(0, total - (state.threadSeen[threadKey(accountId, roomId, rootId)] ?? 0))
+export function threadUnread(accountId: string, roomId: string, rootId: string, _total: number): number | undefined {
+  const key = threadKey(accountId, roomId, rootId)
+  const known = state.threadKnownEvents[key]
+  const boundary = state.threadReadBoundary[key]
+  // The root's total replies is not an unread count. Without a known local
+  // receipt boundary, a live thread's unread status is unknown, not "all new".
+  if (!boundary) return isDemoAccount(accountId) ? known?.length : undefined
+  const index = known?.indexOf(boundary) ?? -1
+  return index >= 0 ? known!.length - index - 1 : undefined
 }
 let stopThread: (() => void) | undefined
-const threadMarked = new Set<string>()
+let threadGeneration = 0
+export const threadReadReady = ref(false)
+function ownsThread(view: NonNullable<typeof state.thread>, generation: number) {
+  return generation === threadGeneration && state.thread === view && !appLocked.value
+    && state.activeAccountId === view.accountId && state.activeRoomId === view.roomId
+}
+function confirmedThreadReplies(view: NonNullable<typeof state.thread>) {
+  return view.messages.filter(value => value.threadRoot === view.rootId && !value.status
+    && (isDemoAccount(view.accountId) || value.id.startsWith('$')))
+}
+function rememberThreadSnapshot(view: NonNullable<typeof state.thread>) {
+  const key = threadKey(view.accountId, view.roomId, view.rootId)
+  const events = confirmedThreadReplies(view).map(value => value.id)
+  state.threadKnownEvents[key] = events
+  const acknowledged = new Set(state.threadAcknowledgedEvents[key] ?? [])
+  let index = -1
+  for (let position = 0; position < events.length; ++position) if (acknowledged.has(events[position])) index = position
+  if (index >= 0) {
+    state.threadReadBoundary[key] = events[index]
+    state.threadSeen[key] = index + 1
+  }
+}
+const threadReads = new VisibleReadAcknowledger(
+  async (target, signal) => {
+    const view = state.thread
+    if (!view || !ownsThread(view, target.generation) || view.rootId !== target.rootId || !threadReadReady.value
+      || !state.details || signal.aborted) return false
+    if (isDemoAccount(target.accountId)) return true
+    return engine.markThreadEventRead(target.accountId, target.roomId, view.rootId, target.eventId, signal)
+  },
+  target => {
+    const view = state.thread
+    if (!view || !ownsThread(view, target.generation) || view.rootId !== target.rootId || !state.details) return
+    const replies = confirmedThreadReplies(view)
+    if (replies.at(-1)?.id !== target.eventId) return
+    const key = threadKey(view.accountId, view.roomId, view.rootId)
+    const acknowledged = state.threadAcknowledgedEvents[key] ??= []
+    if (!acknowledged.includes(target.eventId)) acknowledged.push(target.eventId)
+    if (acknowledged.length > 256) acknowledged.shift()
+    rememberThreadSnapshot(view)
+  },
+  target => {
+    const view = state.thread
+    if (view && ownsThread(view, target.generation) && view.rootId === target.rootId)
+      state.error = 'Could not send the thread read receipt. Reopen this thread to retry.'
+  },
+)
+export function acknowledgeVisibleThread(eventId?: string) {
+  const view = state.thread
+  const latest = view && confirmedThreadReplies(view).at(-1)
+  if (!view || !eventId || latest?.id !== eventId || !state.details || !threadReadReady.value
+    || !ownsThread(view, threadGeneration)) { threadReads.clear(); return }
+  threadReads.update({ accountId: view.accountId, roomId: view.roomId, rootId: view.rootId, eventId, generation: threadGeneration })
+}
 export function closeThread() {
-  stopThread?.(); stopThread = undefined
-  if (state.thread) for (const key of [...threadMarked]) if (key.startsWith(threadKey(state.thread.accountId, state.thread.roomId, state.thread.rootId))) threadMarked.delete(key)
+  ++threadGeneration
+  const stop = stopThread
+  stopThread = undefined
+  threadReadReady.value = false
+  threadReads.clear()
   state.thread = undefined
+  stop?.()
 }
-function markThreadLatest(view: { accountId: string; roomId: string; rootId: string }, messages: Message[]) {
-  const latest = [...messages].reverse().find(item => item.id.startsWith('$') && !item.own)
-  const marker = threadKey(view.accountId, view.roomId, view.rootId) + '/' + (latest?.id ?? 'none')
-  if (threadMarked.has(marker)) return
-  threadMarked.add(marker)
-  if (latest) void action(() => engine.markThreadRead(view.accountId, view.roomId, view.rootId, latest.id))
-}
-export async function openThread(accountId: string, roomId: string, rootId: string) {
+watch(() => state.details, visible => { if (!visible) threadReads.clear() }, { flush: 'sync' })
+export async function openThread(accountId: string, roomId: string, rootId: string): Promise<boolean> {
   closeThread()
+  if (appLocked.value || accountId !== state.activeAccountId || roomId !== state.activeRoomId) return false
+  const generation = threadGeneration
   const loaded = state.messages[messageKey(accountId, roomId)] ?? []
   const root = loaded.find(item => item.id === rootId)
   state.thread = { accountId, roomId, rootId, root, messages: [], end: false, loading: true }
+  const view = state.thread
   if (isDemoAccount(accountId)) {
-    state.thread.messages = loaded.filter(item => item.id === rootId || item.threadRoot === rootId)
-    state.thread.end = true
-    state.thread.loading = false
-    markThreadSeen(accountId, roomId, rootId, root?.threadReplies ?? state.thread.messages.length)
-    return
+    view.messages = loaded.filter(item => item.id === rootId || item.threadRoot === rootId)
+    rememberThreadSnapshot(view)
+    view.end = true; view.loading = false
+    threadReadReady.value = true
+    return true
   }
+  let subscribed = false, receivedSnapshot = false
   try {
-    stopThread = await engine.watchThread(accountId, roomId, rootId, updated => {
-      if (!state.thread || state.thread.rootId !== rootId) return
-      state.thread.messages = updated
-      state.thread.loading = false
-      markThreadSeen(accountId, roomId, rootId, updated.filter(item => item.threadRoot).length || root?.threadReplies)
-      markThreadLatest({ accountId, roomId, rootId }, updated)
+    const stop = await engine.watchThread(accountId, roomId, rootId, updated => {
+      if (!ownsThread(view, generation)) return
+      view.messages = updated
+      rememberThreadSnapshot(view)
+      view.loading = false
+      receivedSnapshot = true
+      if (subscribed) threadReadReady.value = true
     })
+    if (!ownsThread(view, generation)) { stop(); return false }
+    stopThread = stop
+    subscribed = true
+    threadReadReady.value = receivedSnapshot
+    return true
   } catch (error) {
-    state.thread.loading = false
-    state.error = error instanceof Error ? error.message : String(error)
+    if (ownsThread(view, generation)) {
+      view.loading = false
+      state.error = error instanceof Error ? error.message : String(error)
+    }
+    return false
   }
-}
-function markThreadSeen(accountId: string, roomId: string, rootId: string, total?: number) {
-  if (total !== undefined) state.threadSeen[threadKey(accountId, roomId, rootId)] = total
 }
 export async function threadReply(body: string, replyTo?: string) {
   const view = state.thread
-  if (!view || !body.trim()) return false
+  const generation = threadGeneration
+  if (!view || !body.trim() || !ownsThread(view, generation)) return false
   if (isDemoAccount(view.accountId)) {
     const key = messageKey(view.accountId, view.roomId)
     state.messages[key].push(localMessage(body, { threadRoot: view.rootId }))
     view.messages = state.messages[key].filter(item => item.id === view.rootId || item.threadRoot === view.rootId)
-    markThreadSeen(view.accountId, view.roomId, view.rootId, (view.root?.threadReplies ?? 0) + 1)
+    rememberThreadSnapshot(view)
     return true
   }
-  await action(() => engine.sendThreadReply(view.accountId, view.roomId, view.rootId, body, replyTo))
-  return !state.error
+  try {
+    await engine.sendThreadReply(view.accountId, view.roomId, view.rootId, body, replyTo)
+    return ownsThread(view, generation)
+  } catch (error) {
+    if (ownsThread(view, generation)) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  }
 }
 export async function paginateThread() {
   const view = state.thread
-  if (!view || view.end || isDemoAccount(view.accountId)) return
-  const end = await action(() => engine.paginateThread(view.accountId, view.roomId, view.rootId))
-  if (end) view.end = true
+  const generation = threadGeneration
+  if (!view || view.end || isDemoAccount(view.accountId) || !ownsThread(view, generation)) return
+  try {
+    const end = await engine.paginateThread(view.accountId, view.roomId, view.rootId)
+    if (ownsThread(view, generation) && end) view.end = true
+  } catch (error) {
+    if (ownsThread(view, generation)) state.error = error instanceof Error ? error.message : String(error)
+  }
 }
 export const account = computed(() => state.accounts.find(item => item.id === state.activeAccountId))
 export const room = computed(() => state.rooms.find(item => item.id === state.activeRoomId && item.accountId === state.activeAccountId))
@@ -214,25 +305,98 @@ export const accountSearchResults = computed<SearchHit[]>(() => {
 })
 // Jump-to-message context for search results, pins, gallery and permalinks.
 // The live watch keeps running underneath; clearing focus returns to it.
-export const focused = ref<{ roomId: string; eventId: string; messages: Message[] } | undefined>()
+export const focused = ref<{ accountId: string; roomId: string; eventId: string; messages: Message[] } | undefined>()
 let focusStop: (() => void) | undefined
-export async function focusMessage(roomId: string, eventId: string) {
-  clearFocus()
-  const accountId = state.activeAccountId
-  if (isDemoAccount(accountId)) {
-    // Demo rooms have no SDK client: slice the surrounding loaded messages.
-    const loaded = state.messages[messageKey(accountId, roomId)] ?? []
-    const index = loaded.findIndex(item => item.id === eventId)
-    if (index === -1) throw new Error('That message is not loaded in this room.')
-    focused.value = { roomId, eventId, messages: loaded.slice(Math.max(0, index - 20), index + 21) }
+let focusGeneration = 0
+let navigationGeneration = 0
+export const roomReadReady = ref(false)
+function ownsReadTarget(target: ReadTarget) {
+  return target.generation === navigationGeneration && target.accountId === state.activeAccountId
+    && target.roomId === state.activeRoomId && !appLocked.value && roomReadReady.value
+    && !focused.value && !state.messageQuery.trim()
+}
+const readAcknowledgments = new VisibleReadAcknowledger(
+  async (target, signal) => {
+    if (!ownsReadTarget(target) || signal.aborted) return false
+    if (isDemoAccount(target.accountId)) return true
+    return engine.markEventRead(target.accountId, target.roomId, target.eventId, signal)
+  },
+  target => {
+    // Live summaries are SDK-authoritative: a newer unseen event may already
+    // have arrived while this receipt was in flight.
+    if (!ownsReadTarget(target) || !isDemoAccount(target.accountId)) return
+    const latest = messages.value.at(-1)
+    if (latest?.id !== target.eventId) return
+    const current = room.value
+    if (current) { current.unread = 0; current.mentions = 0 }
+  },
+  target => {
+    if (ownsReadTarget(target)) state.error = 'Could not send the read receipt. Reopen this room to retry.'
+  },
+)
+export function acknowledgeVisibleRoom(eventId?: string) {
+  const current = room.value
+  const latest = [...messages.value].reverse().find(value => !value.status
+    && (isDemo.value || value.id.startsWith('$')))
+  if (!eventId || !current || current.membership !== 'joined' || latest?.id !== eventId) {
+    readAcknowledgments.clear()
     return
   }
-  const stop = await engine.focusEvent(accountId, roomId, eventId,
-    updated => { if (focused.value?.eventId === eventId) focused.value.messages = updated })
-  focusStop = stop
-  focused.value = { roomId, eventId, messages: [] }
+  const target = { accountId: state.activeAccountId, roomId: state.activeRoomId, eventId, generation: navigationGeneration }
+  if (!ownsReadTarget(target)) { readAcknowledgments.clear(); return }
+  readAcknowledgments.update(target)
 }
-export function clearFocus() { focusStop?.(); focusStop = undefined; focused.value = undefined }
+// A lease, not a route: delayed UI work must not follow the user into another
+// account/room or survive a leave-and-return to the same view.
+export function captureRoomNavigation() {
+  const generation = navigationGeneration
+  const accountId = state.activeAccountId
+  const roomId = state.activeRoomId
+  return () => generation === navigationGeneration && accountId === state.activeAccountId
+    && roomId === state.activeRoomId && !appLocked.value
+}
+export async function focusMessage(roomId: string, eventId: string): Promise<boolean> {
+  clearFocus()
+  const accountId = state.activeAccountId
+  if (appLocked.value || roomId !== state.activeRoomId || !accountId) return false
+  const generation = focusGeneration
+  const ownsNavigation = captureRoomNavigation()
+  const ownsFocus = () => generation === focusGeneration && ownsNavigation()
+  // Install before subscribing: the SDK may deliver its initial snapshot before
+  // addListener resolves. Never replace that snapshot with an empty array later.
+  readAcknowledgments.clear()
+  focused.value = { accountId, roomId, eventId, messages: [] }
+  try {
+    if (isDemoAccount(accountId)) {
+      const loaded = state.messages[messageKey(accountId, roomId)] ?? []
+      const index = loaded.findIndex(item => item.id === eventId)
+      if (index === -1) throw new Error('That message is not loaded in this room.')
+      focused.value.messages = loaded.slice(Math.max(0, index - 20), index + 21)
+      return true
+    }
+    const stop = await engine.focusEvent(accountId, roomId, eventId, updated => {
+      if (ownsFocus() && focused.value?.accountId === accountId
+        && focused.value.roomId === roomId && focused.value.eventId === eventId) focused.value.messages = updated
+    })
+    if (!ownsFocus()) { stop(); return false }
+    focusStop = stop
+    return true
+  } catch (error) {
+    // A stale failure belongs to the abandoned view, not to the current one.
+    if (!ownsFocus()) return false
+    clearFocus()
+    throw error
+  }
+}
+export function clearFocus() {
+  ++focusGeneration
+  const stop = focusStop
+  focusStop = undefined
+  focused.value = undefined
+  stop?.()
+}
+function invalidateRoomNavigation() { ++navigationGeneration; clearFocus(); closeThread(); roomReadReady.value = false; readAcknowledgments.clear() }
+watch(() => [state.activeAccountId, state.activeRoomId], invalidateRoomNavigation, { flush: 'sync' })
 export interface PinItem { eventId: string; message?: Message; missing: boolean; canPin: boolean }
 export const pins = ref<PinItem[]>([])
 export const pinsRoom = ref('')
@@ -346,6 +510,10 @@ export async function action<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try { return await fn() } catch (error) { state.error = error instanceof Error ? error.message : String(error); return undefined }
 }
 export const engine = new MatrixEngine({
+  cleanupPending(value, _message, status) {
+    rememberCleanup(value, status)
+    clearAccountState(value.id)
+  },
   account(value) {
     const index = state.accounts.findIndex(item => item.id === value.id)
     if (index >= 0) state.accounts[index] = value
@@ -378,11 +546,14 @@ export function jumpToFirstUnread(key: string) {
   state.jumpToEvent = anchor.id
   return true
 }
-export async function selectRoom(value: Room) {
+export async function selectRoom(value: Room): Promise<boolean> {
+  invalidateRoomNavigation()
   const generation = ++watchGeneration
   stopWatching?.(); stopWatching = undefined
   closeThread()
   state.activeRoomId = value.id; state.lastRoom[value.accountId] = value.id; state.mobileRoom = true; state.messageQuery = ''; state.typing = []; state.members = []
+  const ownsNavigation = captureRoomNavigation()
+  const ownsSelection = () => generation === watchGeneration && ownsNavigation()
   state.loading = false
   const key = messageKey(value.accountId, value.id)
   const pendingUnread = value.unread
@@ -391,33 +562,46 @@ export async function selectRoom(value: Room) {
     state.messages[key] ??= initialDemoMessages(value)
     noteFirstUnread(key, state.messages[key], pendingUnread)
     state.members = structuredClone(demoMembers)
-    value.unread = 0; value.mentions = 0
+    roomReadReady.value = true
     pollModPower.value = false
-    return
+    return true
   }
-  if (value.membership !== 'joined') return
+  if (value.membership !== 'joined') return false
   state.loading = true
-  await action(async () => {
+  state.error = ''
+  let receivedSnapshot = false
+  let subscribed = false
+  try {
     const stop = await engine.watchRoom(value.accountId, value.id, updated => {
+      if (!ownsSelection()) return
       state.messages[messageKey(value.accountId, value.id)] = updated
       if (pendingUnread > 0 && !state.firstUnread[key]) noteFirstUnread(key, updated, pendingUnread)
       for (const message of updated) void ensureAvatar(value.accountId, message.sender)
-      if (generation === watchGeneration) state.loading = false
-    }, users => { if (generation === watchGeneration) state.typing = users })
-    if (generation !== watchGeneration) { stop(); return }
+      if (ownsSelection()) {
+        state.loading = false
+        receivedSnapshot = true
+        if (subscribed) roomReadReady.value = true
+      }
+    }, users => { if (ownsSelection()) state.typing = users })
+    if (!ownsSelection()) { stop(); return false }
     stopWatching = stop
-    await engine.markRead(value.accountId, value.id)
-    value.unread = 0; value.mentions = 0
+    subscribed = true
+    roomReadReady.value = receivedSnapshot
     const members = await engine.members(value.accountId, value.id)
+    if (!ownsSelection()) return false
     const ignored = isDemoAccount(value.accountId) ? [] : await engine.ignoredUsers(value.accountId)
-    if (generation === watchGeneration) {
-      state.members = members
-      ignoredUsersState.value = ignored
-      for (const member of members) void ensureAvatar(value.accountId, member.id)
-    }
-  })
-  if (generation === watchGeneration) state.loading = false
-  if (generation === watchGeneration) void refreshPollPower()
+    if (!ownsSelection()) return false
+    state.members = members
+    ignoredUsersState.value = ignored
+    for (const member of members) void ensureAvatar(value.accountId, member.id)
+    void refreshPollPower()
+    return true
+  } catch (error) {
+    if (ownsSelection()) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally {
+    if (ownsSelection()) state.loading = false
+  }
 }
 export function switchAccount(id: string) {
   if (id === state.activeAccountId) return
@@ -872,17 +1056,36 @@ export function maybeNotify(accountId: string, room: Room, message: Message) {
   } catch { /* headless or blocked contexts stay silent */ }
   return true
 }
-export async function goToSuccessor() {
+const pendingSuccessors = new Set<string>()
+export async function goToSuccessor(): Promise<boolean> {
   const current = room.value
   const target = current?.successor
-  if (!current || !target) return false
-  // A tombstoned room stays readable for history; the replacement takes
-  // over when it is joined, otherwise the server decides the join.
-  const known = state.rooms.find(item => item.accountId === current.accountId && item.id === target && item.membership === 'joined')
-  if (known) { await selectRoom(known); state.mobileRoom = true; return true }
-  if (isDemo.value) return false
-  const id = await action(() => engine.join(state.activeAccountId, target))
-  return id !== undefined
+  if (!current || !target || appLocked.value) return false
+  const accountId = current.accountId
+  const key = messageKey(accountId, current.id)
+  if (pendingSuccessors.has(key)) return false
+  pendingSuccessors.add(key)
+  const ownsNavigation = captureRoomNavigation()
+  state.error = ''
+  try {
+    let joined = state.rooms.find(item => item.accountId === accountId && item.id === target && item.membership === 'joined')
+    if (!joined) {
+      if (isDemoAccount(accountId)) return false
+      const id = await engine.join(accountId, target)
+      if (!ownsNavigation()) return false
+      joined = state.rooms.find(item => item.accountId === accountId && item.id === id && item.membership === 'joined')
+      if (!joined) throw new Error('The replacement room was joined but is not available yet. Try again.')
+    }
+    if (!ownsNavigation()) return false
+    const selection = selectRoom(joined)
+    const ownsSelection = captureRoomNavigation()
+    const ready = await selection
+    return ready && ownsSelection()
+  } catch (error) {
+    // Publish within the ownership check, not via the unscoped action helper.
+    if (ownsNavigation()) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally { pendingSuccessors.delete(key) }
 }
 export async function leaveRoom(value: Room) {
   await action(async () => {
@@ -898,7 +1101,16 @@ export async function leaveRoom(value: Room) {
 export const pollModPower = ref(false)
 async function refreshPollPower() {
   if (!room.value || isDemo.value) { pollModPower.value = false; return }
-  pollModPower.value = await action(() => engine.pollModPower(state.activeAccountId, state.activeRoomId)) ?? false
+  const ownsNavigation = captureRoomNavigation()
+  try {
+    const allowed = await engine.pollModPower(state.activeAccountId, state.activeRoomId)
+    if (ownsNavigation()) pollModPower.value = allowed
+  } catch (error) {
+    if (ownsNavigation()) {
+      pollModPower.value = false
+      state.error = error instanceof Error ? error.message : String(error)
+    }
+  }
 }
 export async function createPoll(question: string, answers: string[], kind: 'disclosed' | 'undisclosed' = 'disclosed') {
   return action(async () => {
@@ -1022,18 +1234,19 @@ export async function signIn(server: string, username: string, password: string)
   if (id) { switchAccount(id); retireDemo(); notify('Account connected') }
   return id
 }
-// A real account replaces the demo: the demo is onboarding, not a second
-// account alongside the user's own. It returns only when the last real
-// account leaves the device (see seedDemo).
+// A real account replaces every tour fixture, not just the personal demo.
+// Demo data is entered explicitly, never as a side effect of account removal.
 export function retireDemo() {
-  if (!state.accounts.some(item => item.id === 'demo-home')) return
-  if (!state.accounts.some(item => item.id !== 'demo-home')) return
-  if (state.activeAccountId === 'demo-home') return
-  clearAccountState('demo-home')
+  if (!state.accounts.some(item => item.connection !== 'demo')) return
+  if (account.value?.connection === 'demo') return
+  for (const item of [...state.accounts]) {
+    if (item.connection === 'demo') clearAccountState(item.id)
+  }
 }
 export function seedDemo() {
-  if (state.accounts.some(item => item.id === 'demo-home')) return
-  state.accounts.push(...structuredClone(demoAccounts))
+  for (const item of demoAccounts) {
+    if (!state.accounts.some(account => account.id === item.id)) state.accounts.push(structuredClone(item))
+  }
   const saved = readDemo()
   for (const room of saved.rooms ?? demoRooms) {
     if (!state.rooms.some(item => item.id === room.id && item.accountId === room.accountId)) {
@@ -1044,45 +1257,90 @@ export function seedDemo() {
     if (!state.messages[key]) state.messages[key] = structuredClone(messages)
   }
 }
-export async function signOut() {
-  const id = state.activeAccountId
-  if (isDemo.value) { notify('This is a demo account. Connect a Matrix account to sign in.'); return }
-  await action(async () => {
-    // Sign out revokes the server session when reachable and always erases
-    // the local account: credentials, drafts, crypto store and cached media.
-    const result = await engine.logout(id)
+// All real-account exit paths share the same destination: another real account
+// or the signed-out gate. Never introduce demo identities into a live session.
+function selectAfterAccountExit() {
+  for (const item of [...state.accounts]) {
+    if (item.connection === 'demo') clearAccountState(item.id)
+  }
+  const next = state.accounts.find(item => item.id === state.activeAccountId) ?? state.accounts[0]
+  switchAccount(next?.id ?? '')
+}
+// All cleanup retries are local-only. A completed remote operation is never
+// repeated, even if credentials, draft deletion or database cleanup failed.
+const exitingAccounts = new Set<string>()
+function rememberCleanup(target: Account, status: PendingCleanup['status'], serverRevoked?: boolean) {
+  const previous = state.pendingCleanups.find(item => item.account.id === target.id)
+  const entry: PendingCleanup = {
+    account: { ...target }, status, busy: false,
+    serverRevoked: serverRevoked ?? previous?.serverRevoked,
+  }
+  if (previous) Object.assign(previous, entry)
+  else state.pendingCleanups.push(entry)
+}
+async function finishSessionExit(
+  target: Account,
+  work: () => Promise<LocalCleanupResult & { serverRevoked?: boolean }>,
+  success: string,
+): Promise<ExitOutcome> {
+  const id = target.id
+  if (exitingAccounts.has(id)) return { status: 'error', cleanupStarted: false }
+  exitingAccounts.add(id)
+  state.error = ''
+  try {
+    const result = await work()
+    if (result.status === 'restart-required') rememberCleanup(target, result.status, result.serverRevoked)
+    else state.pendingCleanups = state.pendingCleanups.filter(item => item.account.id !== id)
     clearAccountState(id)
-    // Leaving the last account returns to the login gate unless this build
-    // serves the demo tour.
-    if (demoEnabled()) { seedDemo(); switchAccount('demo-home') }
-    else if (state.accounts[0]) switchAccount(state.accounts[0].id)
-    else { state.activeAccountId = ''; state.activeRoomId = '' }
-    notify(result?.serverRevoked === false
+    selectAfterAccountExit()
+    if (result.status === 'complete') notify(result.serverRevoked === false
       ? 'Signed out on this device. The server session may still be active.'
-      : 'Signed out of this account')
-  })
+      : success)
+    return result
+  } catch (error) {
+    let cleanupStarted = error instanceof LocalCleanupError
+    try { cleanupStarted ||= isSessionRemoving(id) } catch { /* The typed cleanup error still identifies an in-memory tombstone. */ }
+    if (cleanupStarted) {
+      rememberCleanup(target, 'error')
+      clearAccountState(id)
+      selectAfterAccountExit()
+      state.error = 'Local cleanup did not finish. Retry local cleanup; do not assume all local data was erased.'
+    } else state.error = 'The operation could not be completed. Check your connection and account details before trying again.'
+    return { status: 'error', cleanupStarted }
+  } finally { exitingAccounts.delete(id) }
+}
+export async function signOut(id = state.activeAccountId): Promise<ExitOutcome> {
+  const target = state.accounts.find(value => value.id === id)
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === id))
+    return { status: 'error', cleanupStarted: false }
+  return finishSessionExit({ ...target }, () => engine.logout(id), 'Signed out of this account')
 }
 export function retryConnection(id: string) {
-  // Manual re-probe for an offline or errored account: resets the backoff and
-  // polls immediately instead of waiting for the next scheduled tick.
   return action(() => engine.retryConnection(id))
 }
-export async function removeAccount(id: string) {
-  if (state.accounts.find(value => value.id === id)?.connection === 'demo') { notify('The demo account cannot be removed.'); return }
-  await action(async () => {
-    // Remove erases the local account without contacting the server, for
-    // sessions that are already invalid or unreachable.
-    await engine.removeAccount(id)
-    clearAccountState(id)
-    if (state.activeAccountId === id) {
-      if (demoEnabled()) { seedDemo(); switchAccount('demo-home') }
-      else if (state.accounts[0]) switchAccount(state.accounts[0].id)
-      else { state.activeAccountId = ''; state.activeRoomId = '' }
-    }
-    notify('Removed this account from this device')
-  })
+export async function removeAccount(id: string): Promise<ExitOutcome> {
+  const target = state.accounts.find(value => value.id === id)
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === id))
+    return { status: 'error', cleanupStarted: false }
+  return finishSessionExit({ ...target }, () => engine.removeAccount(id), 'Removed this account from this device')
+}
+export async function retryPendingCleanup(id: string): Promise<ExitOutcome> {
+  const pending = state.pendingCleanups.find(item => item.account.id === id)
+  if (!pending || pending.busy || appLocked.value) return { status: 'error', cleanupStarted: false }
+  pending.busy = true
+  try {
+    // Deliberately never call logout or deactivate on this path.
+    const result = await finishSessionExit({ ...pending.account }, () => engine.removeAccount(id), 'Local cleanup completed')
+    if (result.status !== 'error' && pending.serverRevoked !== undefined)
+      return { ...result, serverRevoked: pending.serverRevoked }
+    return result
+  } finally { pending.busy = false }
 }
 function clearAccountState(id: string) {
+  readAcknowledgments.forgetAccount(id)
+  threadReads.forgetAccount(id)
+  for (const map of [state.threadSeen, state.threadReadBoundary, state.threadKnownEvents, state.threadAcknowledgedEvents])
+    for (const key of Object.keys(map)) if (key.startsWith(`${id}/`)) delete map[key]
   if (state.thread?.accountId === id) closeThread()
   state.accounts = state.accounts.filter(value => value.id !== id)
   state.rooms = state.rooms.filter(value => value.accountId !== id)
@@ -1104,14 +1362,26 @@ export async function initialize() {
   if (restored || appLocked.value) return
   restored = true
   await action(() => engine.restoreAll())
-  // A reload with saved sessions must not resurrect the demo alongside them.
-  retireDemo()
+  const restoreError = state.error
+  // Restored sessions arrive through SDK callbacks, which do not choose a
+  // view. Prefer an existing real selection, otherwise select the first
+  // restored account (including an expired account needing sign-in recovery).
+  const realAccounts = state.accounts.filter(item => item.connection !== 'demo')
+  const selected = realAccounts.find(item => item.id === state.activeAccountId) ?? realAccounts[0]
+  if (selected) {
+    switchAccount(selected.id)
+    retireDemo()
+  }
+  if (!selected && state.pendingCleanups.length) selectAfterAccountExit()
+  // switchAccount clears view errors; preserve restoration failures explicitly.
+  state.error = restoreError || selected?.error || state.error
 }
 // ---- Device app lock (#38) ----
 // The PIN gates the whole app and (outside the OS keychain) encrypts stored
 // secrets with a PIN-derived key. Desktop notifications stay silent while
 // locked so message bodies never leak onto a locked screen.
 export const appLocked = ref(isLockEnabled() && !isUnlocked())
+watch(appLocked, invalidateRoomNavigation, { flush: 'sync' })
 export const lockEnabled = ref(isLockEnabled())
 export const lockTimeoutMin = ref(loadLockTimeout())
 export const lockNote = lockProtectionNote()
@@ -1119,19 +1389,29 @@ export function setLockTimeoutMin(minutes: number) {
   try { saveLockTimeout(minutes); lockTimeoutMin.value = minutes }
   catch (error) { state.error = error instanceof Error ? error.message : String(error) }
 }
+let unlockGeneration = 0
 export async function unlockApp(pin: string): Promise<boolean> {
+  const attempt = ++unlockGeneration
   state.error = ''
   try {
-    // Wrong-PIN copy belongs to the caller (translated lock screen); only
-    // lockout failures surface here.
-    if (!await verifyPin(pin)) return false
-  } catch (error) { state.error = error instanceof Error ? error.message : String(error); return false }
+    // Keep the shell locked while secrets warm. Once exposed, rearm the watch
+    // synchronously: no delayed selection may erase newer focus/filter/thread intent.
+    if (!await verifyPin(pin) || attempt !== unlockGeneration) return false
+    await engine.warmSecrets()
+    if (attempt !== unlockGeneration) return false
+  } catch (error) {
+    if (attempt === unlockGeneration) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  }
   appLocked.value = false
-  await engine.warmSecrets()
+  const mobileRoom = state.mobileRoom
+  const selected = room.value ? selectRoom(room.value) : undefined
+  state.mobileRoom = mobileRoom
   await initialize()
-  return true
+  await selected
+  return attempt === unlockGeneration && !appLocked.value
 }
-export function lockNow() { lockApp(); clearSecretsCache(); appLocked.value = true }
+export function lockNow() { ++unlockGeneration; lockApp(); clearSecretsCache(); appLocked.value = true }
 export async function setupAppPin(pin: string): Promise<boolean> {
   state.error = ''
   try {
@@ -1263,15 +1543,12 @@ export async function prepareDeactivate() {
 }
 // Deactivation is irreversible server-side: the UI confirms twice (an
 // explicit acknowledgment plus the last-device warning) before calling in.
-export async function deactivateAccount(password: string, erase: boolean) {
-  const id = state.activeAccountId
-  if (isDemo.value) { notify('The demo account cannot be deactivated.'); return false }
-  await action(() => engine.deactivate(id, password, erase))
-  if (state.error) return false
-  clearAccountState(id)
-  if (state.activeAccountId === id) { seedDemo(); switchAccount('demo-home') }
-  notify('Account deactivated')
-  return true
+export async function deactivateAccount(password: string, erase: boolean): Promise<ExitOutcome> {
+  const target = account.value
+  if (!target || target.connection === 'demo' || state.pendingCleanups.some(item => item.account.id === target.id))
+    return { status: 'error', cleanupStarted: false }
+  const captured = { ...target }
+  return finishSessionExit(captured, () => engine.deactivate(captured.id, password, erase), 'Account deactivated')
 }
 export interface RoomSettings { roomId: string; name: string; topic: string; avatar: string; historyVisibility: string; joinRule: string; encrypted: boolean; space: boolean; power: { users: Record<string, number>; usersDefault: number; stateDefault: number; eventsDefault: number; ban: number; kick: number; redact: number; invite: number } | null; permissions: { own: number; state: boolean; ban: boolean; kick: boolean; invite: boolean }; members: Member[]; children: SpaceChild[]; canOrganize: boolean }
 export const roomSettings = ref<RoomSettings | null>(null)

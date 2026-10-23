@@ -412,5 +412,41 @@
     "title": "Good conversations start here",
     "subtitle": "Connect your Matrix account or create a new one — or look around the demo first.",
     "explore": "Explore the demo"
+  },
+  "sessionExit": {
+    "signoutTitle": "Sign out of this session?",
+    "removeTitle": "Remove this session from this device?",
+    "signoutDescription": "Fern will try to sign out this session on the server, then erase its saved credentials, drafts and encryption keys from this device. If the server cannot be reached, its session may remain active.",
+    "removeDescription": "This erases local credentials, drafts and encryption keys only. It does not sign out the session on the server or delete your Matrix account.",
+    "historyWarning": "Encrypted history may be unavailable when you return unless you have a working recovery key or another device that can restore it.",
+    "checking": "Checking recovery status…",
+    "recovery": {
+      "Unknown": "Recovery status could not be confirmed. Do not assume your encrypted history is recoverable.",
+      "Enabled": "Recovery is configured. Make sure you have saved a working recovery key; this check cannot confirm that.",
+      "Disabled": "Recovery is not enabled on this session.",
+      "Incomplete": "Recovery setup is incomplete and needs attention."
+    },
+    "noBackup": "No server backup was found.",
+    "backupUnknown": "The server backup could not be checked.",
+    "lastDevice": "This appears to be your last signed-in device.",
+    "devicesUnknown": "Fern could not confirm whether another device is available.",
+    "acknowledge": "I understand that local data will be erased and encrypted history may be lost.",
+    "review": "Review recovery",
+    "signoutAction": "Sign out and erase local data",
+    "removeAction": "Erase local session data",
+    "errors": {
+      "failed": "The operation could not be completed. Check your connection and account details before trying again.",
+      "missing": "This session is no longer available. Cancel to return to Fern."
+    },
+    "localSession": "Local session: {id}",
+    "nativeWarning": "Close every other Fern window and app instance before continuing. Removal cannot verify erasure across other running native instances.",
+    "cleanupTitle": "Local cleanup unfinished",
+    "restartRequired": "Some local databases are still open. Local erasure is not complete. Close other Fern windows, then restart Fern to finish cleanup. If another window still blocks deletion, this notice will remain.",
+    "cleanupError": "Local cleanup failed. The server session may already be revoked or the account deactivated. Do not assume local data was erased. Retry local cleanup before restarting; this will not repeat sign-out or deactivation.",
+    "restart": "Restart Fern to finish cleanup",
+    "retryLocal": "Retry local cleanup",
+    "serverStillActive": "The server session may still be active.",
+    "close": "Close",
+    "draftStorageError": "A draft could not be saved or loaded. Check browser storage and try again before restarting."
   }
 }

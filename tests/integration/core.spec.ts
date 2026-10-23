@@ -1,15 +1,19 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { finishLocalCleanup } from './cleanup'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { MatrixEngine } from '../../src/sdk/engine'
 import type { Account, Room, Message } from '../../src/types'
+import { verificationUser, type FixtureUsers, type VerificationScenario, backupMigrationUser, matrixFailureSummary, matrixResponseBody, missingBackupResponse } from './fixture-contract'
 
 interface FixtureUser { username: string; password: string; userId: string; token: string }
-interface Fixture { base: string; version: string; users: FixtureUser[] }
+interface Fixture extends FixtureUsers { base: string; version: string }
 declare global {
   interface Window {
     directoryTestIds: string[]
+    offlineQueueErrors: { transactionId: string; recoverable: boolean }[]
+    offlineQueueSent: { transactionId: string; eventId: string }[]
     matrixTest: { engine: MatrixEngine; accounts: Record<string, Account>; rooms: Record<string, Room[]>;
       messages: Record<string, Message[]>; typing: Record<string, string[]>; errors: string[]; stops: (() => void)[];
       verification: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[] }[] }
@@ -97,16 +101,19 @@ async function matrix(request: APIRequestContext, user: FixtureUser, method: str
   const response = await request.fetch(fixture.base + '/_matrix/client/v3' + path, {
     method, headers: { Authorization: 'Bearer ' + user.token }, data,
   })
-  // Report status/path, never headers, credentials or full response bodies.
-  expect(response.status(), method + ' ' + path).toBeLessThan(300)
-  return response.json()
+  const body: unknown = await matrixResponseBody(response.status(), () => response.json())
+  // Only a fixed operation label, status and allowlisted Matrix error code.
+  // Do not expose paths, response messages, headers or credentials.
+  expect(response.status(), matrixFailureSummary('client-api', response.status(), body)).toBeLessThan(300)
+  return body as any
 }
 async function admin(request: APIRequestContext, method: string, path: string, data?: unknown) {
   const response = await request.fetch(fixture.base + '/_synapse/admin' + path, {
     method, headers: { Authorization: 'Bearer ' + adminUser.token }, data,
   })
-  expect(response.status(), method + ' ' + path).toBeLessThan(300)
-  return response.json()
+  const body: unknown = await matrixResponseBody(response.status(), () => response.json())
+  expect(response.status(), matrixFailureSummary('admin-api', response.status(), body)).toBeLessThan(300)
+  return body as any
 }
 async function watch(page: Page, accountId: string, roomId: string) {
   await expect.poll(() => page.evaluate(({ accountId, roomId }) =>
@@ -127,6 +134,32 @@ async function findMessage(page: Page, accountId: string, roomId: string, body: 
     window.matrixTest.messages[accountId + '/' + roomId].find(message => message.body === body)!, { accountId, roomId, body })
 }
 
+// Device verification requests target only already self-signed devices in the
+// pinned Rust SDK. Two fresh logins of shared Alice are not a valid pairing.
+// Give each scenario an isolated identity and establish the receiving device
+// through normal recovery setup before creating the unverified requester.
+async function verificationPair(pa: Page, pb: Page, scenario: VerificationScenario) {
+  const user = verificationUser(fixture, scenario)
+  await boot(pa); await boot(pb)
+  const b = await login(pb, user)
+  await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+  await pb.evaluate(async b => {
+    // Keep the generated recovery key in this page; never return or log it.
+    await window.matrixTest.engine.enableRecovery(b, () => {})
+  }, b)
+  await expect.poll(() => pb.evaluate(async b => (await window.matrixTest.engine.security(b)).verified, b))
+    .toBe('Verified')
+  const a = await login(pa, user)
+  await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
+  await expect.poll(() => pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a))
+    .toBe('Unverified')
+  // Wait for the requester's SDK to discover a signed recipient rather than
+  // sending to an empty device list while the initial key query is pending.
+  await expect.poll(() => pa.evaluate(a => window.matrixTest.engine.getClient(a).encryption().hasDevicesToVerifyAgainst(), a))
+    .toBe(true)
+  return { a, b }
+}
+
 test('live password login, simultaneous account isolation, restoration and logout', async ({ page }) => {
   await boot(page)
   const a = await login(page, alice)
@@ -141,10 +174,15 @@ test('live password login, simultaneous account isolation, restoration and logou
   await boot(page)
   await page.evaluate(() => window.matrixTest.engine.restoreAll())
   await expect.poll(() => page.evaluate(() => Object.values(window.matrixTest.accounts).filter(a => a.connection === 'online').length)).toBe(2)
-  await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+  const aExit = await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+  expect(aExit.serverRevoked).toBe(true)
+  expect(['complete', 'restart-required']).toContain(aExit.status)
+  await finishLocalCleanup(page, a, boot)
   expect(await page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem('fern.sessions.v1')!)))).toEqual([b])
   expect(await page.evaluate(b => window.matrixTest.engine.getClient(b).userId(), b)).toBe(bob.userId)
-  await page.evaluate(b => window.matrixTest.engine.logout(b), b)
+  const bExit = await page.evaluate(b => window.matrixTest.engine.logout(b), b)
+  expect(bExit.serverRevoked).toBe(true)
+  await finishLocalCleanup(page, b, boot)
   await page.evaluate(() => window.matrixTest.engine.dispose())
 })
 
@@ -184,19 +222,6 @@ test('removing one account erases only its data and blocks stale restore', async
   const context = await browser.newContext()
   const pa = await context.newPage()
   const databases = (page: Page) => page.evaluate(async () => (await indexedDB.databases()).map(db => db.name))
-  // The SDK's IndexedDB connections die with their page, so database unlinks
-  // are observed from a second page sharing this context's storage. Re-issuing
-  // a delete is idempotent: it only hurries what removal already requested.
-  async function expectUnlinked(page: Page, id: string) {
-    for (const suffix of ['', '::matrix-sdk-crypto', '::matrix-sdk-state']) {
-      await page.evaluate(name => new Promise<void>(resolve => {
-        const request = indexedDB.deleteDatabase(name)
-        request.onsuccess = request.onerror = request.onblocked = () => resolve()
-      }), `fern-${id}${suffix}`)
-    }
-    await expect.poll(() => page.evaluate(async (wanted: string) =>
-      (await indexedDB.databases()).every(db => !db.name?.includes(wanted)), id)).toBe(true)
-  }
   await boot(pa)
   const a = await login(pa, alice)
   const b = await login(pa, bob)
@@ -208,11 +233,11 @@ test('removing one account erases only its data and blocks stale restore', async
   }, [a, b])
   expect((await databases(pa)).some(name => name?.includes(a))).toBe(true)
   expect((await databases(pa)).some(name => name?.includes(b))).toBe(true)
-  // Local-only removal contacts no server and is idempotent. Credentials,
-  // drafts and handles are erased synchronously.
-  await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
-  await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
-  expect(Object.keys(JSON.parse(await pa.evaluate(() => localStorage.getItem('fern.sessions.v1')!)))).toEqual([b])
+  // Local-only removal stops access now; open WASM stores explicitly require
+  // a restart rather than falsely announcing completed physical erasure.
+  const removal = await pa.evaluate(a => window.matrixTest.engine.removeAccount(a), a)
+  expect(removal).toEqual({ status: 'restart-required' })
+  expect(Object.keys(JSON.parse(await pa.evaluate(() => localStorage.getItem('fern.sessions.v1')!))).sort()).toEqual([a, b].sort())
   expect(await pa.evaluate(a => localStorage.getItem(`fern.draft.${a}/!room:x`), a)).toBeNull()
   expect(await pa.evaluate(b => localStorage.getItem(`fern.draft.${b}/!room:x`), b)).toBe('unsent words B')
   await expect.poll(() => pa.evaluate(async id => {
@@ -221,18 +246,17 @@ test('removing one account erases only its data and blocks stale restore', async
   const pb = await context.newPage()
   await boot(pb)
   await pa.close()
-  await expectUnlinked(pb, a)
+  await finishLocalCleanup(pb, a, boot)
   expect((await databases(pb)).some(name => name?.includes(b))).toBe(true)
   // A fresh engine restoring from the remaining sessions never resurrects
   // the removed account: its credentials are gone, so the keychain delegate
   // cannot supply a session for it.
-  await pb.evaluate(() => window.matrixTest.engine.restoreAll())
   await expect.poll(() => pb.evaluate(() => Object.values(window.matrixTest.accounts).filter(account => account.connection === 'online').length)).toBe(1)
   expect(await pb.evaluate(() => Object.values(window.matrixTest.accounts).map(account => account.userId))).toEqual([bob.userId])
   // Sign-out revokes the server session and erases the local account too.
   const revoked = await pb.evaluate(b => window.matrixTest.engine.logout(b), b)
   expect(revoked.serverRevoked).toBe(true)
-  expect(Object.keys(JSON.parse(await pb.evaluate(() => localStorage.getItem('fern.sessions.v1') ?? '{}')))).toEqual([])
+  expect(['complete', 'restart-required']).toContain(revoked.status)
   expect(await pb.evaluate(b => localStorage.getItem(`fern.draft.${b}/!room:x`), b)).toBeNull()
   await expect.poll(() => pb.evaluate(async id => {
     try { window.matrixTest.engine.getClient(id); return false } catch { return true }
@@ -240,7 +264,7 @@ test('removing one account erases only its data and blocks stale restore', async
   const pc = await context.newPage()
   await boot(pc)
   await pb.close()
-  await expectUnlinked(pc, b)
+  await finishLocalCleanup(pc, b, boot)
   await pc.evaluate(() => window.matrixTest.engine.dispose())
   await pc.close()
   await context.close()
@@ -287,7 +311,46 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
     const loginVia = async (page: Page, user: FixtureUser) => page.evaluate(({ base, username, password }) =>
       window.matrixTest.engine.login(base, username, password),
     { base: viaProxy, username: user.username, password: user.password })
+    // Both pre-login discovery and the login response advertise Synapse's
+    // direct public_baseurl. Keep both on this disposable proxy, otherwise
+    // the SDK correctly follows discovery and silently bypasses the blackout.
+    const loginPath = /^\/_matrix\/client\/(?:v3|r0)\/login$/
+    const discoveryPath = '/.well-known/matrix/client'
+    const proxyDiscovery = (url: URL) => url.origin === viaProxy
+      && (url.pathname === discoveryPath || loginPath.test(url.pathname))
+    const rewritten = { discovery: 0, login: 0 }
+    await pa.route(proxyDiscovery, async route => {
+      const path = new URL(route.request().url()).pathname
+      const discovery = path === discoveryPath && route.request().method() === 'GET'
+      const login = loginPath.test(path) && route.request().method() === 'POST'
+      if (!discovery && !login) return route.continue()
+      const response = await route.fetch()
+      if (!response.ok()) return route.fulfill({ response })
+      const body = await response.json()
+      if (discovery) {
+        body['m.homeserver'] = { ...body['m.homeserver'], base_url: viaProxy }
+        rewritten.discovery++
+      } else {
+        body.well_known = {
+          ...body.well_known,
+          'm.homeserver': { ...body.well_known?.['m.homeserver'], base_url: viaProxy },
+        }
+        rewritten.login++
+      }
+      const headers = response.headers()
+      // The response body changed; let Playwright compute its new length.
+      delete headers['content-length']
+      delete headers['content-encoding']
+      await route.fulfill({ response, headers, json: body })
+    })
     const a = await loginVia(pa, alice)
+    await pa.unroute(proxyDiscovery)
+    expect(rewritten.discovery).toBeGreaterThan(0)
+    expect(rewritten.login).toBeGreaterThan(0)
+    expect(await pa.evaluate(a => {
+      const record = JSON.parse(localStorage.getItem('fern.sessions.v1') ?? '{}')[a]
+      return record?.homeserverUrl ? new URL(record.homeserverUrl).origin : null
+    }, a)).toBe(viaProxy)
     const b = await login(pb, bob)
     const { room_id: roomId } = await matrix(request, reference, 'POST', '/createRoom', {
       name: 'Offline queue fixture', visibility: 'public', preset: 'public_chat',
@@ -299,39 +362,95 @@ test('offline sends queue, discard drops, and reconnect delivers once', async ({
       await p.evaluate(({ id, roomId }) => window.matrixTest.engine.join(id, roomId), { id, roomId })
       await watch(p, id, roomId)
     }
+    await pa.evaluate(async ({ a, roomId }) => {
+      window.offlineQueueErrors = []
+      window.offlineQueueSent = []
+      const handle = await window.matrixTest.engine.getClient(a).subscribeToSendQueueUpdates({
+        onUpdate: (id, update) => {
+          if (id === roomId && update.tag === 'SendError') {
+            window.offlineQueueErrors.push({ transactionId: update.inner.transactionId, recoverable: update.inner.isRecoverable })
+          }
+          if (id === roomId && update.tag === 'SentEvent') {
+            window.offlineQueueSent.push({ transactionId: update.inner.transactionId, eventId: update.inner.eventId })
+          }
+        },
+      })
+      window.matrixTest.stops.push(() => handle.cancel())
+    }, { a, roomId })
+    let keptId = ''
     await blackout()
     // NOTE: the sync-service state stays 'online' through the blackout (the
     // SDK retries internally without flipping its service state), so downtime
     // status is asserted only on the send queue below. See issue #8.
     try {
+      // Prove the endpoint used by the persisted SDK session is unreachable,
+      // not merely that a separate proxy listener was stopped.
+      expect(await pa.evaluate(async base => {
+        try {
+          await fetch(base + '/_matrix/client/versions', { cache: 'no-store', signal: AbortSignal.timeout(5000) })
+          return false
+        } catch { return true }
+      }, viaProxy)).toBe(true)
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Queued while offline'), { a, roomId })
-      // The local echo stays pending while the network is down.
-      await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
-        ?.some(message => message.body === 'Queued while offline' && message.status === 'sending') ?? false,
-      { a, roomId })).toBe(true)
+      // The pinned SDK disables the room queue after a network failure.
+      // Exercise that real failure/recovery path, rather than requiring its
+      // transient NotSentYet state to survive until Playwright polls.
+      await expect.poll(() => pa.evaluate(({ a, roomId }) => {
+        const echoes = (window.matrixTest.messages[a + '/' + roomId] ?? [])
+          .filter(message => message.body === 'Queued while offline')
+        const echo = echoes[0]
+        return {
+          count: echoes.length,
+          failed: echo?.status === 'failed',
+          recoverable: !!echo && window.offlineQueueErrors.some(error => error.transactionId === echo.id && error.recoverable),
+          queueEnabled: window.matrixTest.engine.getClient(a).getRoom(roomId)?.isSendQueueEnabled(),
+        }
+      }, { a, roomId })).toEqual({ count: 1, failed: true, recoverable: true, queueEnabled: false })
+      keptId = await pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]!
+        .find(message => message.body === 'Queued while offline')!.id, { a, roomId })
       // A queued echo can be discarded before it ever leaves the device.
       await pa.evaluate(({ a, roomId }) => window.matrixTest.engine.send(a, roomId, 'Discarded while offline'), { a, roomId })
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
         ?.some(message => message.body === 'Discarded while offline') ?? false, { a, roomId })).toBe(true)
       const discarded = await pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]!
         .find(message => message.body === 'Discarded while offline')!, { a, roomId })
-      await pa.evaluate(({ a, roomId, messageId }) => window.matrixTest.engine.discardSend(a, roomId, messageId),
-        { a, roomId, messageId: discarded.id })
+      expect(await pa.evaluate(({ a, roomId, messageId }) => window.matrixTest.engine.discardSend(a, roomId, messageId),
+        { a, roomId, messageId: discarded.id })).toBe(true)
       await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
-        ?.some(message => message.body === 'Discarded while offline' && message.status === 'sending') ?? false,
+        ?.some(message => message.body === 'Discarded while offline') ?? false,
       { a, roomId })).toBe(false)
+      // The kept local echo and its original SDK transaction survive discard.
+      expect(await pa.evaluate(({ a, roomId, keptId }) => window.matrixTest.messages[a + '/' + roomId]
+        ?.some(message => message.id === keptId && message.body === 'Queued while offline' && message.status === 'failed') ?? false,
+      { a, roomId, keptId })).toBe(true)
+      // Check the actual server through the independent reference connection,
+      // not just a receiver that may still be catching up with sync.
+      const offlineHistory = await matrix(request, reference, 'GET', `/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`)
+      expect(offlineHistory.chunk.some((event: { content?: { body?: string } }) =>
+        ['Queued while offline', 'Discarded while offline'].includes(event.content?.body ?? ''))).toBe(false)
     } finally {
       await restore()
     }
     // Reconnect flushes the queue: the kept message arrives, the discarded
     // one never does, and the flush delivers exactly once.
-    await findMessage(pb, b, roomId, 'Queued while offline')
+    const delivered = await findMessage(pb, b, roomId, 'Queued while offline')
+    await expect.poll(() => pa.evaluate(({ keptId, eventId }) => window.offlineQueueSent
+      .filter(event => event.transactionId === keptId && event.eventId === eventId).length,
+    { keptId, eventId: delivered.id })).toBe(1)
+    await expect.poll(() => pa.evaluate(({ a, roomId }) => window.matrixTest.messages[a + '/' + roomId]
+      ?.filter(message => message.body === 'Queued while offline' && message.status === undefined).length ?? 0,
+    { a, roomId })).toBe(1)
+    // Repeated connectivity probes must not recreate an already sent event.
+    await pa.evaluate(async a => { await window.matrixTest.engine.retryConnection(a); await window.matrixTest.engine.retryConnection(a) }, a)
     await pb.waitForTimeout(5000)
     const deliveries = await pb.evaluate(({ b, roomId }) => window.matrixTest.messages[b + '/' + roomId]
       ?.filter(message => message.body === 'Queued while offline').length ?? 0, { b, roomId })
     expect(deliveries).toBe(1)
     expect(await pb.evaluate(({ b, roomId }) => window.matrixTest.messages[b + '/' + roomId]
       ?.some(message => message.body === 'Discarded while offline') ?? false, { b, roomId })).toBe(false)
+    const recoveredHistory = await matrix(request, reference, 'GET', `/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`)
+    expect(recoveredHistory.chunk.filter((event: { content?: { body?: string } }) => event.content?.body === 'Queued while offline').length).toBe(1)
+    expect(recoveredHistory.chunk.some((event: { content?: { body?: string } }) => event.content?.body === 'Discarded while offline')).toBe(false)
   } finally {
     for (const p of [pa, pb]) {
       await p.evaluate(async () => { window.matrixTest?.stops.forEach(stop => stop()); await window.matrixTest?.engine.dispose() }).catch(() => {})
@@ -652,11 +771,7 @@ test('same-account device verification accepts and compares SAS on both devices'
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationAccept')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -691,6 +806,7 @@ test('same-account device verification accepts and compares SAS on both devices'
     await pb.evaluate(b => window.matrixTest.engine.finishVerification(b, true), b)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification.some(value => value.status === 'verified'))).toBe(true)
     await expect.poll(() => pb.evaluate(() => window.matrixTest.verification.some(value => value.status === 'verified'))).toBe(true)
+    await expect.poll(() => pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Verified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()
@@ -703,11 +819,7 @@ test('unanswered verification request stays pending, cancels cleanly and allows 
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationCancel')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -746,6 +858,7 @@ test('unanswered verification request stays pending, cancels cleanly and allows 
     await pa.evaluate(a => window.matrixTest.engine.cancelVerification(a), a)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification
       .filter(value => value.status === 'canceled').length)).toBeGreaterThan(1)
+    expect(await pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Unverified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()
@@ -758,11 +871,7 @@ test('same-account device verification can reject a SAS comparison', async ({ br
   const pa = await ca.newPage()
   const pb = await cb.newPage()
   try {
-    await boot(pa); await boot(pb)
-    const a = await login(pa, alice)
-    const b = await login(pb, alice)
-    await expect.poll(() => pa.evaluate(a => window.matrixTest.accounts[a]?.connection, a)).toBe('online')
-    await expect.poll(() => pb.evaluate(b => window.matrixTest.accounts[b]?.connection, b)).toBe('online')
+    const { a, b } = await verificationPair(pa, pb, 'verificationReject')
     await expect.poll(() => pb.evaluate(async b => {
       try { await window.matrixTest.engine.listenForVerificationRequests(b, value => window.matrixTest.verification.push(value)); return true }
       catch { return false }
@@ -782,6 +891,7 @@ test('same-account device verification can reject a SAS comparison', async ({ br
     await pb.evaluate(b => window.matrixTest.engine.finishVerification(b, false), b)
     await expect.poll(() => pa.evaluate(() => window.matrixTest.verification.some(value => value.status === 'canceled' || value.status === 'failed'))).toBe(true)
     await expect.poll(() => pb.evaluate(() => window.matrixTest.verification.some(value => value.status === 'canceled' || value.status === 'failed'))).toBe(true)
+    expect(await pa.evaluate(async a => (await window.matrixTest.engine.security(a)).verified, a)).toBe('Unverified')
   } finally {
     for (const page of [pa, pb]) await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
     await ca.close(); await cb.close()
@@ -910,11 +1020,14 @@ test('authenticated avatars, image metadata and media safety use the live server
     }, { a, roomId, message: evil })
     expect(evilType).toBe('application/octet-stream')
     // Blob URLs die with the session that created them.
-    await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+    const cleanup = await page.evaluate(a => window.matrixTest.engine.logout(a), a)
+    expect(cleanup.serverRevoked).toBe(true)
+    expect(['complete', 'restart-required']).toContain(cleanup.status)
     const revoked = await page.evaluate(async url => {
       try { await (await fetch(url!)).arrayBuffer(); return false } catch { return true }
     }, avatarUrl)
     expect(revoked).toBe(true)
+    await finishLocalCleanup(page, a, boot)
   } finally {
     if (nioStarted) await nio.stop().catch(() => {})
     await page.evaluate(async () => { await window.matrixTest?.engine.dispose() }).catch(() => {})
@@ -1160,6 +1273,15 @@ test('cross-user rotated-out sessions stay missing on request', async ({ browser
 
 test('backup migration moves a fresh device to the rotated key', async ({ browser, request }) => {
   test.setTimeout(180_000)
+  // Server-side backup state survives browser-context disposal. This account
+  // is not shared with earlier recovery or device-verification scenarios.
+  const user = backupMigrationUser(fixture)
+  const backup = await request.get(fixture.base + '/_matrix/client/v3/room_keys/version', {
+    headers: { Authorization: 'Bearer ' + user.token },
+  })
+  const backupBody: unknown = await backup.json().catch(() => null)
+  expect(backup.status(), matrixFailureSummary('backup-precondition', backup.status(), backupBody)).toBe(404)
+  expect(missingBackupResponse(backup.status(), backupBody), 'Expected an absent backup for the isolated fixture user').toBe(true)
   const ca = await browser.newContext()
   const cb = await browser.newContext()
   const pa = await ca.newPage()
@@ -1167,7 +1289,7 @@ test('backup migration moves a fresh device to the rotated key', async ({ browse
   try {
     await boot(pa)
     await boot(pb)
-    const a = await login(pa, alice)
+    const a = await login(pa, user)
     const roomId = await pa.evaluate(({ a }) =>
       window.matrixTest.engine.createRoom(a, 'Migration fixture', 'backup rotation'), { a })
     await watch(pa, a, roomId)
@@ -1181,7 +1303,7 @@ test('backup migration moves a fresh device to the rotated key', async ({ browse
     await findMessage(pa, a, roomId, 'After rotation')
     const newKey = await pa.evaluate(({ a }) => window.matrixTest.engine.resetRecovery(a), { a })
     expect(newKey).not.toBe(oldKey)
-    const b = await login(pb, alice)
+    const b = await login(pb, user)
     await watch(pb, b, roomId)
     // The superseded key no longer opens the replaced backup.
     const stale = await pb.evaluate(async ({ b, oldKey }) => {

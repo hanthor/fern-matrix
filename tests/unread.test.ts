@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { state, firstUnreadAnchor, noteFirstUnread, jumpToFirstUnread, selectRoom, messageKey } from '../src/store'
+import { state, firstUnreadAnchor, noteFirstUnread, jumpToFirstUnread, selectRoom, messageKey, acknowledgeVisibleRoom } from '../src/store'
 import type { Message } from '../src/types'
 
 // First-unread jump (#41): the anchor derives from the SDK notification
@@ -44,6 +44,9 @@ describe('unread pill state', () => {
     const loaded = state.messages[key]
     expect(loaded.length).toBeGreaterThan(2)
     expect(state.firstUnread[key]).toEqual({ id: loaded[loaded.length - 2].id, count: 2 })
+    expect(room.unread).toBe(2)
+    acknowledgeVisibleRoom(loaded.at(-1)!.id)
+    await Promise.resolve()
     expect(room.unread).toBe(0)
   })
 

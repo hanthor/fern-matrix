@@ -1,8 +1,11 @@
 import type { ClientInterface, Session, SyncServiceInterface, TaskHandleInterface, RoomInterface, TimelineInterface, TimelineItemInterface, EventTimelineItem, MediaSourceInterface, SessionVerificationControllerInterface, SessionVerificationRequestDetails, RoomListEntriesWithDynamicAdaptersResultInterface, RoomDescription, ShieldState, SsoHandlerInterface, GrantQrLoginProgressListener, QrLoginProgressListener } from './generated/matrix_sdk_ffi'
 import type { OAuthAuthorizationDataInterface } from './generated/matrix_sdk'
 import type { Account, Room, Message, Member, DirectoryRoom, SpaceChild } from '../types'
+import type { ExitRecoveryStatus } from '../session-exit'
+import { isSessionRemoving as isRemovingSession, markSessionRemoving, routingStorageLock, deleteSessionDrafts } from '../session-storage'
 import type { RoomNotificationMode } from './generated/matrix_sdk_ffi'
 import { applyDiffs } from '../diff'
+import { probeQueueRecovery, SendQueueRecovery, type QueueReachability } from './send-queue-recovery'
 import { extractMentions, markdownToHtml, stripReplyFallback } from '../format'
 import { formatGeoUri, locationTextAlternative, parseGeoUri } from '../location'
 import { forwardBlockReason } from '../forward'
@@ -92,25 +95,54 @@ function savedAccounts(): Record<string, SessionRecord> {
 }
 async function adoptLegacySecrets(secrets: [string, SessionSecrets][]): Promise<void> {
   for (const [storeId, entry] of secrets) {
-    if (cachedSecrets(storeId)) continue
-    try { await persistSecrets(storeId, entry) }
-    catch { continue }
-    const raw = readSessionRecords()
-    const record = splitLegacyRecords({ [storeId]: raw[storeId] }).records[storeId]
-    if (record) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...raw, [storeId]: record }))
+    if (!cachedSecrets(storeId)) {
+      try { await persistSession(storeId, entry) }
+      catch { continue }
+    }
+    try {
+      await routingStorageLock(false, () => {
+        if (isRemovingSession(storeId)) return
+        const raw = readSessionRecords()
+        const record = splitLegacyRecords({ [storeId]: raw[storeId] }).records[storeId]
+        if (record) localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...raw, [storeId]: record }))
+      })
+    } catch { /* Keep the legacy record for a later migration attempt. */ }
   }
 }
-function saveRecord(id: string, record: SessionRecord) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readSessionRecords(), [id]: record }))
+// A cleanup tombstone is independent of routing metadata so a partial
+// deletion remains retryable but cannot restore or refresh this session.
+const sessionWrites = new Map<string, Set<Promise<void>>>()
+function persistSession(id: string, secrets: SessionSecrets): Promise<void> {
+  if (isRemovingSession(id)) return Promise.reject(new Error('This session is being removed from this device.'))
+  const pending = persistSecrets(id, secrets)
+  const writes = sessionWrites.get(id) ?? new Set<Promise<void>>()
+  writes.add(pending); sessionWrites.set(id, writes)
+  const finish = () => { writes.delete(pending); if (!writes.size) sessionWrites.delete(id) }
+  void pending.then(finish, finish)
+  return pending
+}
+async function drainSessionWrites(id: string): Promise<void> {
+  const writes = [...(sessionWrites.get(id) ?? [])]
+  if (!writes.length) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(writes),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('A session secret write has not finished; retry local removal.')), 5000) }),
+    ])
+  } finally { if (timer !== undefined) clearTimeout(timer) }
+}
+function saveRecord(id: string, record: SessionRecord): Promise<void> {
+  return routingStorageLock(false, () => {
+    if (isRemovingSession(id)) return
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...readSessionRecords(), [id]: record }))
+  })
 }
 async function commitSession(storeId: string, secrets: SessionSecrets): Promise<Session> {
-  await persistSecrets(storeId, secrets)
-  saveRecord(storeId, { userId: secrets.session.userId, homeserverUrl: secrets.session.homeserverUrl })
+  await persistSession(storeId, secrets)
+  await saveRecord(storeId, { userId: secrets.session.userId, homeserverUrl: secrets.session.homeserverUrl })
   return secrets.session
 }
-// App.vue persists per-room drafts under this prefix; the engine owns erasing
-// them because account removal must not leave another account's input behind.
-const draftPrefix = (id: string) => `fern.draft.${id}/`
 // Deletes the databases the SDK spreads one account across. Used by removal
 // and by abandoned login attempts so failed starts leave no orphaned stores.
 function dropTempStore(storeId: string): Promise<void> {
@@ -130,10 +162,38 @@ function deleteIdbDatabase(name: string): Promise<void> {
     } catch { resolve() }
   })
 }
+// Session exit must not mistake a queued/blocked deletion for completed erasure.
+// Keep the abandoned-login helper above unchanged.
+function deleteExitDatabase(name: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let blocked = false
+    const timer = setTimeout(() => reject(new Error(blocked ? 'Database deletion remained blocked' : 'Database deletion timed out')), 5000)
+    const finish = (error?: Error) => {
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    try {
+      const request = indexedDB.deleteDatabase(name)
+      request.onsuccess = () => finish()
+      request.onerror = () => finish(new Error('Database deletion failed'))
+      request.onblocked = () => { blocked = true }
+    } catch { finish(new Error('Database deletion could not start')) }
+  })
+}
+export type LocalCleanupResult = { status: 'complete' } | { status: 'restart-required' }
+export type CleanupStage = 'tombstone' | 'sync-stop' | 'cancel-handles' | 'detach-verification' | 'secret-write-drain' | 'secret-delete' | 'drafts' | 'media-urls' | 'database-app' | 'database-crypto' | 'database-state' | 'routing'
+export class LocalCleanupError extends Error {
+  constructor(readonly failures: unknown[], readonly stages: CleanupStage[] = []) {
+    super('Local cleanup did not finish. The server session may already be revoked or deactivated. Retry removing this session from this device.' + (stages.length ? ' Incomplete steps: ' + [...new Set(stages)].join(', ') + '.' : ''))
+    this.name = 'LocalCleanupError'
+  }
+}
 export interface EngineEvents {
   account(account: Account): void
   rooms(accountId: string, rooms: Room[]): void
   error(accountId: string, message: string): void
+  cleanupPending?(account: Account, message: string, status: 'restart-required' | 'error'): void
 }
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -185,6 +245,7 @@ export class MatrixEngine {
   private syncs = new Map<string, SyncServiceInterface>()
   private handles = new Map<string, TaskHandleInterface[]>()
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
+  private queueRecoveries = new Map<string, { recover: () => Promise<QueueReachability | undefined>; stop: () => void; rejectAuth: () => void; readonly authRejected: boolean }>()
   private refreshFailures = new Map<string, number>()
   private refreshMarkedOffline = new Set<string>()
   // Rooms this client created encrypted: sends wait until the SDK confirms
@@ -202,8 +263,18 @@ export class MatrixEngine {
   // removed: stale attaches must stop their own sync instead of registering it.
   private attachTokens = new Map<string, number>()
   private alive = true
-  constructor(private events: EngineEvents) {}
+  private events: EngineEvents
+  constructor(events: EngineEvents) {
+    // Late SDK callbacks must not resurrect a removed session in any view.
+    this.events = {
+      account: value => { if (!isRemovingSession(value.id)) events.account(value) },
+      rooms: (id, rooms) => { if (!isRemovingSession(id)) events.rooms(id, rooms) },
+      error: (id, message) => { if (!isRemovingSession(id)) events.error(id, message) },
+      cleanupPending: events.cleanupPending,
+    }
+  }
   getClient(id: string) {
+    if (isRemovingSession(id)) throw new Error('This session is being removed from this device.')
     const client = this.clients.get(id)
     if (!client) throw new Error('This account is not connected. Sign in or retry the connection.')
     return client
@@ -231,20 +302,23 @@ export class MatrixEngine {
       .autoEnableCrossSigning(true)
       .setSessionDelegate({
         retrieveSessionFromKeychain: userId => {
+          if (isRemovingSession(data.storeId)) throw new Error('This session needs local cleanup. Remove it from this device again.')
           const found = Object.entries(savedAccounts()).find(([storeId, record]) => record.userId === userId && storeId === data.storeId)
           const secrets = found ? cachedSecrets(found[0]) : undefined
           if (!secrets) throw new Error('Sign in again on this device: the saved session secret is missing.')
           return sdk.Session.new(secrets.session)
         },
         saveSessionInKeychain: session => {
+          if (isRemovingSession(data.storeId)) return
           data.session = session
           // Refreshes are persisted only after this login has been committed.
           if (savedAccounts()[data.storeId]) {
             // The cache primes synchronously for the delegate; a failed
             // keychain write surfaces instead of silently losing the rotation.
-            persistSecrets(data.storeId, { session, passphrase: data.passphrase })
+            persistSession(data.storeId, { session, passphrase: data.passphrase })
               .catch(error => { this.events.error(data.storeId, `Saving the refreshed session failed (${errorText(error)}). Sign in again if sync stops.`) })
-            saveRecord(data.storeId, { userId: session.userId, homeserverUrl: session.homeserverUrl })
+            void saveRecord(data.storeId, { userId: session.userId, homeserverUrl: session.homeserverUrl })
+              .catch(() => this.events.error(data.storeId, 'Saving the session routing record failed.'))
           }
         },
       })
@@ -419,24 +493,36 @@ export class MatrixEngine {
   }
   /** Re-prime the secrets cache (post-unlock): reads decrypt with the live key. */
   async warmSecrets(): Promise<void> {
-    await Promise.allSettled(Object.keys(savedAccounts()).map(id => loadSecrets(id)))
+    await Promise.allSettled(Object.keys(savedAccounts()).filter(id => !isRemovingSession(id)).map(id => loadSecrets(id)))
   }
   async restoreAll() {
     const entries = Object.entries(savedAccounts())
     await Promise.allSettled(entries.map(async ([id, record]) => {
       const account: Account = { id, userId: record.userId, name: record.userId.split(':')[0].slice(1), color: '#477962', connection: 'connecting' }
+      if (isRemovingSession(id)) {
+        // Resume local erasure only. Never repeat logout/deactivation or build
+        // a target SDK client before its pending stores have been removed.
+        try {
+          const cleanup = await this.eraseLocal(id)
+          if (cleanup.status === 'restart-required') this.events.cleanupPending?.(account, 'Close other Fern windows and restart to finish removing local data.', 'restart-required')
+        } catch (error) { this.events.cleanupPending?.(account, errorText(error), 'error') }
+        return
+      }
       this.events.account(account)
       try {
         const secrets = cachedSecrets(id) ?? await loadSecrets(id)
         if (!secrets) throw new Error('The saved session secret is missing on this device. Sign in again.')
         const sdk = await loadSdk()
+        if (isRemovingSession(id)) return
         const client = await (await this.builder({ storeId: id, passphrase: secrets.passphrase }, false)).homeserverUrl(record.homeserverUrl).build()
+        if (isRemovingSession(id)) return
         await client.restoreSession(sdk.Session.new(secrets.session))
         await this.attach(client, id)
       } catch (error) { this.events.account({ ...account, connection: 'error', error: errorText(error) }); this.events.error(id, errorText(error)) }
     }))
   }
   private async checkSessionAlive(id: string, account: Account, syncState: number) {
+    if (this.queueRecoveries.get(id)?.authRejected) return
     const record = savedAccounts()[id]
     const session = record ? (cachedSecrets(id) ?? await loadSecrets(id))?.session : undefined
     if (session?.accessToken && record?.homeserverUrl) {
@@ -445,6 +531,7 @@ export class MatrixEngine {
       try {
         const response = await fetch(`${record.homeserverUrl.replace(/\/*$/, '')}/_matrix/client/v3/account/whoami`,
           { headers: { Authorization: `Bearer ${session.accessToken}` }, signal: controller.signal })
+        if (this.queueRecoveries.get(id)?.authRejected) return
         // 401 alone decides: unknown endpoints must never read as expired.
         if (response.status === 401) {
           this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
@@ -454,14 +541,79 @@ export class MatrixEngine {
       } catch { /* Unreachable homeserver: plain offline below. */ }
       finally { clearTimeout(timeout) }
     }
+    if (this.queueRecoveries.get(id)?.authRejected) return
     this.events.account({ ...account, connection: syncState === 3 ? 'error' : 'offline',
       ...(syncState === 3 ? { error: 'Sync error. Retrying automatically.' } : {}) })
     void this.refreshRooms(id)
   }
+  private async installQueueRecovery(
+    client: ClientInterface, id: string, account: Account, current: () => boolean, handles: TaskHandleInterface[],
+  ): Promise<boolean> {
+    this.queueRecoveries.get(id)?.stop()
+    const policy = new SendQueueRecovery()
+    let probeController: AbortController | undefined
+    let authRejected = false
+    const recovery = {
+      get authRejected() { return authRejected },
+      rejectAuth: () => { authRejected = true; policy.stop(); probeController?.abort() },
+      stop: () => { policy.stop(); probeController?.abort() },
+      recover: () => authRejected ? Promise.resolve('unauthorized' as const) : policy.recover(async () => {
+        if (!current()) return 'unavailable'
+        const controller = new AbortController()
+        probeController = controller
+        const timeout = setTimeout(() => controller.abort(), 10000)
+        try {
+          // Read the SDK's current session, not a stale saved access token.
+          const session = client.session()
+          const result = await probeQueueRecovery(session, controller.signal)
+          if (!current() || controller.signal.aborted) return 'unavailable'
+          const latest = client.session()
+          // A token refresh during the probe invalidates its verdict, including
+          // a 401 for the old token. Probe the SDK's fresh session next time.
+          if (latest.accessToken !== session.accessToken || latest.userId !== session.userId
+            || latest.homeserverUrl !== session.homeserverUrl) return 'unavailable'
+          if (result === 'unauthorized') {
+            authRejected = true
+            this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
+            this.events.error(id, 'Session expired. Sign in again.')
+          }
+          return result
+        } finally {
+          clearTimeout(timeout)
+          if (probeController === controller) probeController = undefined
+        }
+      }, roomId => {
+        if (!current()) return
+        const room = client.getRoom(roomId)
+        if (!room) throw new Error('The queued room is not available yet.')
+        // Re-enable the original SDK queue, preserving its transaction IDs.
+        room.enableSendQueue(true)
+      }, current),
+    }
+    this.queueRecoveries.set(id, recovery)
+    try {
+      const handle = await client.subscribeToSendQueueUpdates({
+        onUpdate: (roomId, update) => { if (current()) policy.update(roomId, update) },
+      })
+      if (!current()) {
+        handle.cancel()
+        recovery.stop()
+        if (this.queueRecoveries.get(id) === recovery) this.queueRecoveries.delete(id)
+        return false
+      }
+      handles.push(handle)
+      return true
+    } catch (error) {
+      recovery.stop()
+      if (this.queueRecoveries.get(id) === recovery) this.queueRecoveries.delete(id)
+      throw error
+    }
+  }
   private async attach(client: ClientInterface, id: string) {
+    if (isRemovingSession(id)) throw new Error('Local cleanup is incomplete. Remove this session from this device again.')
     const token = (this.attachTokens.get(id) ?? 0) + 1
     this.attachTokens.set(id, token)
-    const current = () => this.alive && this.attachTokens.get(id) === token && savedAccounts()[id] !== undefined
+    const current = () => this.alive && !isRemovingSession(id) && this.attachTokens.get(id) === token && savedAccounts()[id] !== undefined
     this.clients.set(id, client)
     const account: Account = { id, userId: client.userId(), name: client.userId().split(':')[0].slice(1), color: '#477962', connection: 'connecting' }
     this.events.account(account)
@@ -474,13 +626,17 @@ export class MatrixEngine {
       this.events.error(id, unsupported)
       return
     }
+    if (!current()) return
     const sync = await client.syncService().withOfflineMode().finish()
+    if (!current()) { await sync.stop(); return }
     this.syncs.set(id, sync)
     const handles: TaskHandleInterface[] = []
     this.handles.set(id, handles)
+    if (!await this.installQueueRecovery(client, id, account, current, handles)) return
     handles.push(sync.state({ onUpdate: state => {
-      if (!current()) return
+      if (!current() || this.queueRecoveries.get(id)?.authRejected) return
       if (state === 1) {
+        if (this.queueRecoveries.get(id)?.authRejected) return
         this.events.account({ ...account, connection: 'online' })
         void this.refreshRooms(id)
         return
@@ -494,12 +650,17 @@ export class MatrixEngine {
       }
       this.events.account({ ...account, connection: 'connecting' })
     } }))
-    const delegate = client.setDelegate({ didReceiveAuthError: () => this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' }) })
+    const delegate = client.setDelegate({ didReceiveAuthError: () => {
+      if (!current()) return
+      this.queueRecoveries.get(id)?.rejectAuth()
+      this.events.account({ ...account, connection: 'error', error: 'Session expired. Sign in again.' })
+    } })
     if (delegate) handles.push(delegate)
     const allRooms = await sync.roomListService().allRooms()
+    if (!current()) return
     let setup = false
     const setupEntries = () => {
-      if (setup || !this.alive) return
+      if (setup || !current()) return
       setup = true
       const entries = allRooms.entriesWithDynamicAdapters(200, { onUpdate: () => void this.refreshRooms(id) })
       this.roomLists.set(id, entries)
@@ -518,21 +679,22 @@ export class MatrixEngine {
     // Room-list poll with exponential backoff while failing, so a dead server
     // does not spin hot and recovery is picked up within a bounded delay.
     const poll = () => {
-      if (!this.alive || !this.clients.has(id)) return
+      if (!current() || this.queueRecoveries.get(id)?.authRejected) return
       // Reachability first (it owns the offline detector), then the local
       // room-list refresh; neither step rejects.
       void this.pingServer(id).then(() => this.refreshRooms(id)).finally(() => {
-        if (!this.alive || !this.clients.has(id)) return
+        if (!current() || this.queueRecoveries.get(id)?.authRejected) return
         this.timers.set(id, setTimeout(poll, pollDelay(this.refreshFailures.get(id) ?? 0)))
       })
     }
     this.timers.set(id, setTimeout(poll, 4000))
     try { account.name = await client.displayName() } catch { /* MXID fallback */ }
-    this.events.account({ ...account, connection: 'online' })
+    if (!current()) return
+    if (!this.queueRecoveries.get(id)?.authRejected) this.events.account({ ...account, connection: 'online' })
     await this.refreshRooms(id)
   }
   async refreshRooms(accountId: string) {
-    if (!this.alive || this.refreshes.has(accountId)) return
+    if (!this.alive || isRemovingSession(accountId) || this.refreshes.has(accountId)) return
     this.refreshes.add(accountId)
     try {
       const sdk = await loadSdk()
@@ -543,9 +705,11 @@ export class MatrixEngine {
       for (let offset = 0; offset < sdkRooms.length; offset += 20) {
         const batch = await Promise.allSettled(sdkRooms.slice(offset, offset + 20).map(async room => {
           const [info, latest, parents] = await Promise.all([room.roomInfo(), room.latestEvent(), client.spaceService().joinedParentsOfChild(room.id()).catch(() => [])])
+          if (isRemovingSession(accountId)) throw new Error('Session removed.')
           const preview = latest ? this.parseEvent(accountId, room.id(), latest) : undefined
           return { id: info.id, accountId, name: info.displayName ?? info.id, topic: info.topic ?? '', direct: info.isDirect, space: info.isSpace, encrypted: info.encryptionState === sdk.EncryptionState.Encrypted, favorite: info.isFavourite, unread: Number(info.numUnreadNotifications), mentions: Number(info.numUnreadMentions), members: Number(info.activeMembersCount), preview: preview?.body ?? '', timestamp: preview?.timestamp ?? 0, parents: parents.map(parent => parent.roomId), membership: info.membership === sdk.Membership.Invited ? 'invited' : info.membership === sdk.Membership.Left ? 'left' : 'joined', successor: info.successorRoom?.roomId } satisfies Room
         }))
+        if (!this.alive || isRemovingSession(accountId)) return
         for (const value of batch) if (value.status === 'fulfilled') rooms.push(value.value)
       }
       if (this.alive && this.clients.has(accountId)) this.events.rooms(accountId, rooms)
@@ -553,6 +717,7 @@ export class MatrixEngine {
     finally { this.refreshes.delete(accountId) }
   }
   private noteRefreshSuccess(accountId: string) {
+    if (isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     this.refreshFailures.set(accountId, 0)
     if (this.refreshMarkedOffline.delete(accountId)) {
       const userId = this.clients.get(accountId)?.userId()
@@ -560,6 +725,7 @@ export class MatrixEngine {
     }
   }
   private noteRefreshFailure(accountId: string, error: unknown) {
+    if (isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     const failures = (this.refreshFailures.get(accountId) ?? 0) + 1
     this.refreshFailures.set(accountId, failures)
     if (isAuthFailure(error)) {
@@ -571,7 +737,7 @@ export class MatrixEngine {
     if (failures >= OFFLINE_AFTER_FAILURES) this.markOffline(accountId)
   }
   private markOffline(accountId: string) {
-    if (this.refreshMarkedOffline.has(accountId)) return
+    if (this.queueRecoveries.get(accountId)?.authRejected || this.refreshMarkedOffline.has(accountId)) return
     this.refreshMarkedOffline.add(accountId)
     const userId = this.clients.get(accountId)?.userId()
     const message = 'Connection lost. Retrying automatically — use Retry connection to probe now.'
@@ -583,31 +749,44 @@ export class MatrixEngine {
   // dead server; failures feed the offline detector above.
   private async pingServer(accountId: string) {
     const client = this.clients.get(accountId)
-    if (!client || !this.alive) return
+    if (!client || !this.alive || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
     try {
       const base = client.homeserver().replace(/\/*$/, '')
       const response = await fetch(`${base}/_matrix/client/versions`, { signal: controller.signal })
       if (!response.ok) throw new Error(`The server answered ${response.status}.`)
+      if (this.clients.get(accountId) !== client) return
+      const recovery = await this.queueRecoveries.get(accountId)?.recover()
+      if (this.clients.get(accountId) !== client) return
+      if (recovery === 'unauthorized') return
+      if (recovery === 'unavailable') throw new Error('Authenticated connection recovery is not available yet.')
       this.noteRefreshSuccess(accountId)
-    } catch (error) { this.noteRefreshFailure(accountId, error) }
+    } catch (error) { if (this.clients.get(accountId) === client) this.noteRefreshFailure(accountId, error) }
     finally { clearTimeout(timeout) }
   }
   // Manual re-probe for an offline or errored account: resets the backoff and
   // checks reachability immediately instead of waiting for the next tick.
   async retryConnection(accountId: string) {
-    const userId = this.getClient(accountId).userId()
+    const client = this.getClient(accountId)
+    const userId = client.userId()
+    if (this.queueRecoveries.get(accountId)?.authRejected) {
+      this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'error', error: 'Session expired. Sign in again.' })
+      return
+    }
     this.refreshFailures.set(accountId, 0)
     this.refreshMarkedOffline.delete(accountId)
     this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'connecting' })
     await this.pingServer(accountId)
+    if (this.clients.get(accountId) !== client || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
     if ((this.refreshFailures.get(accountId) ?? 0) === 0) {
       await this.refreshRooms(accountId)
+      if (this.clients.get(accountId) !== client || isRemovingSession(accountId) || this.queueRecoveries.get(accountId)?.authRejected) return
       this.events.account({ id: accountId, userId, name: userId.split(':')[0].slice(1), color: '#477962', connection: 'online' })
     } else this.markOffline(accountId)
   }
   private parseEvent(accountId: string, roomId: string, event: EventTimelineItem): Message {
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const identity = event.eventOrTransactionId
     const id = identity.tag === 'EventId' ? identity.inner.eventId : identity.inner.transactionId
     const cacheKey = `${accountId}/${roomId}/${id}`
@@ -689,15 +868,18 @@ export class MatrixEngine {
     const room = this.getRoom(accountId, roomId)
     await this.syncs.get(accountId)?.roomListService().subscribeToRooms([roomId])
     const timeline = await room.timeline()
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.timelineCache.set(key, timeline)
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
-    const typing = room.subscribeToTypingNotifications({ call: users => onTyping(users.filter(user => user !== room.ownUserId())) })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
+    const typing = room.subscribeToTypingNotifications({ call: users => { if (!isRemovingSession(accountId)) onTyping(users.filter(user => user !== room.ownUserId())) } })
     // Drop this watch's timeline object so rapid room switches cannot
     // accumulate native timelines. The identity check keeps a stale stop from
     // evicting a newer watch's timeline; send/paginate recreate lazily.
@@ -708,9 +890,11 @@ export class MatrixEngine {
   }
   private async timeline(accountId: string, roomId: string) {
     const key = `${accountId}/${roomId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.timelineCache.get(key)
     if (cached) return cached
     const timeline = await this.getRoom(accountId, roomId).timeline()
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.timelineCache.set(key, timeline)
     return timeline
   }
@@ -750,6 +934,7 @@ export class MatrixEngine {
   private threadTimelines = new Map<string, TimelineInterface>()
   async threadTimeline(accountId: string, roomId: string, rootId: string) {
     const key = `${accountId}/${roomId}/${rootId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.threadTimelines.get(key)
     if (cached) return cached
     const sdk = await loadSdk()
@@ -758,6 +943,7 @@ export class MatrixEngine {
       filter: new sdk.TimelineFilter.All(), internalIdPrefix: undefined,
       dateDividerMode: sdk.DateDividerMode.Daily, trackReadReceipts: true, reportUtds: false,
     })
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     this.threadTimelines.set(key, timeline)
     return timeline
   }
@@ -773,11 +959,13 @@ export class MatrixEngine {
     })
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
     return () => handle.cancel()
   }
   // Best-effort preview of one pinned event: the focused message when the
@@ -838,11 +1026,13 @@ export class MatrixEngine {
     const timeline = await this.threadTimeline(accountId, roomId, rootId)
     let items: TimelineItemInterface[] = []
     const handle = await timeline.addListener({ onUpdate: updates => {
+      if (isRemovingSession(accountId)) return
       items = applyDiffs(items, updates)
       const messages: Message[] = []
       for (const item of items) { const event = item.asEvent(); if (event) messages.push(this.parseEvent(accountId, roomId, event)) }
       onMessages(messages)
     } })
+    if (isRemovingSession(accountId)) { handle.cancel(); throw new Error('Session removed.') }
     return () => handle.cancel()
   }
   async paginateThread(accountId: string, roomId: string, rootId: string) { return (await this.threadTimeline(accountId, roomId, rootId)).paginateBackwards(40) }
@@ -851,6 +1041,20 @@ export class MatrixEngine {
     const content = await this.messageContent(timeline, body)
     if (replyId) await timeline.sendReply(content, replyId)
     else await timeline.send(content)
+  }
+  // Receipt preparation must not create a thread timeline or outlive cleanup.
+  async markThreadEventRead(accountId: string, roomId: string, rootId: string, eventId: string, signal: AbortSignal): Promise<boolean> {
+    const key = `${accountId}/${roomId}/${rootId}`
+    const timeline = this.threadTimelines.get(key)
+    const event = this.eventCache.get(`${accountId}/${roomId}/${eventId}`)
+    if (!this.alive || isRemovingSession(accountId) || !timeline || signal.aborted
+      || event?.eventOrTransactionId.tag !== 'EventId' || event.eventOrTransactionId.inner.eventId !== eventId
+      || event.localSendState?.tag === 'NotSentYet' || event.localSendState?.tag === 'SendingFailed'
+      || event.content.tag !== 'MsgLike' || event.content.inner.content.threadRoot !== rootId) return false
+    const sdk = await loadSdk()
+    if (!this.alive || isRemovingSession(accountId) || signal.aborted || this.threadTimelines.get(key) !== timeline) return false
+    await timeline.sendReadReceipt(sdk.ReceiptType.Read, eventId, { signal })
+    return true
   }
   async markThreadRead(accountId: string, roomId: string, rootId: string, eventId: string) {
     const sdk = await loadSdk()
@@ -975,11 +1179,13 @@ export class MatrixEngine {
   }
   async download(accountId: string, roomId: string, message: Message) {
     const key = `${accountId}/${roomId}/${message.id}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.objectUrls.get(key)
     if (cached) return cached
     const source = this.media.get(key)
     if (!source) throw new Error('This attachment has not finished syncing.')
     const bytes = await this.getClient(accountId).getMediaContent(source)
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: safeMediaMime(message.attachment?.mime) }))
     this.objectUrls.set(key, url)
     return url
@@ -990,11 +1196,13 @@ export class MatrixEngine {
   async profileAvatar(accountId: string, userId: string): Promise<string | undefined> {
     const sdk = await loadSdk()
     const key = `${accountId}/avatar/${userId}`
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const cached = this.objectUrls.get(key)
     if (cached) return cached
     const profile = await this.getClient(accountId).getProfile(userId)
     if (!profile.avatarUrl) return undefined
     const bytes = await this.getClient(accountId).getMediaContent(sdk.MediaSource.fromUrl(profile.avatarUrl))
+    if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
     this.objectUrls.set(key, url)
     return url
@@ -1005,6 +1213,19 @@ export class MatrixEngine {
     if (cached) { URL.revokeObjectURL(cached); this.objectUrls.delete(key) }
   }
   async paginate(accountId: string, roomId: string) { return (await this.timeline(accountId, roomId)).paginateBackwards(40) }
+  // A visible event, not whichever event happens to be newest after an await.
+  // Never create a new timeline merely to acknowledge an abandoned view.
+  async markEventRead(accountId: string, roomId: string, eventId: string, signal: AbortSignal): Promise<boolean> {
+    const key = `${accountId}/${roomId}`
+    const timeline = this.timelineCache.get(key)
+    const event = this.eventCache.get(`${key}/${eventId}`)
+    if (!this.alive || isRemovingSession(accountId) || !timeline || signal.aborted || event?.eventOrTransactionId.tag !== 'EventId'
+      || event.eventOrTransactionId.inner.eventId !== eventId) return false
+    const sdk = await loadSdk()
+    if (!this.alive || isRemovingSession(accountId) || signal.aborted || this.timelineCache.get(key) !== timeline) return false
+    await timeline.sendReadReceipt(sdk.ReceiptType.Read, eventId, { signal })
+    return true
+  }
   async markRead(accountId: string, roomId: string) { const sdk = await loadSdk(); await this.getRoom(accountId, roomId).markAsRead(sdk.ReceiptType.Read) }
   async typing(accountId: string, roomId: string, value: boolean) { await this.getRoom(accountId, roomId).typingNotice(value) }
   async favorite(accountId: string, roomId: string, value: boolean) { await this.getRoom(accountId, roomId).setIsFavourite(value, undefined); await this.refreshRooms(accountId) }
@@ -1272,6 +1493,25 @@ export class MatrixEngine {
   // own poll, and members who may redact others can end anyone's (mirrors the
   // pin/unpin power-level pattern instead of attempting a forbidden event).
   async pollModPower(accountId: string, roomId: string) { return (await this.getRoom(accountId, roomId).roomInfo()).powerLevels?.canOwnUserRedactOther() ?? false }
+  // Advisory checks only: never create, rotate or delete recovery material.
+  // Unknown is preserved on server errors; another device is not proof that
+  // the user has saved a recovery key or that all history has been backed up.
+  async sessionExitStatus(accountId: string, signal: AbortSignal): Promise<ExitRecoveryStatus> {
+    const sdk = await loadSdk()
+    if (signal.aborted) return { recovery: 'Unknown', backupExists: 'unknown', lastDevice: 'unknown' }
+    const encryption = this.getClient(accountId).encryption()
+    const value = sdk.RecoveryState[encryption.recoveryState()]
+    const recovery = value === 'Enabled' || value === 'Disabled' || value === 'Incomplete' ? value : 'Unknown'
+    const [backup, last] = await Promise.allSettled([
+      encryption.backupExistsOnServer({ signal }),
+      encryption.isLastDevice({ signal }),
+    ])
+    return {
+      recovery,
+      backupExists: backup.status === 'fulfilled' ? backup.value : 'unknown',
+      lastDevice: last.status === 'fulfilled' ? last.value : 'unknown',
+    }
+  }
   async security(accountId: string) {
     const sdk = await loadSdk()
     const client = this.getClient(accountId)
@@ -1431,13 +1671,17 @@ export class MatrixEngine {
     return encryption.enableRecovery(true, undefined, { onUpdate: status => progress(status.tag) })
   }
   private verificationDelegate(accountId: string, controller: SessionVerificationControllerInterface, update: (value: { status: string; emojis?: { symbol: string; description: string }[]; numbers?: number[]; deviceName?: string }) => void) {
+    if (isRemovingSession(accountId)) { controller.setDelegate(undefined); throw new Error('Session removed.') }
+    const notify = update
+    update = value => { if (!isRemovingSession(accountId)) notify(value) }
     this.verificationControllers.set(accountId, controller)
     controller.setDelegate({
       didReceiveVerificationRequest: details => {
+        if (isRemovingSession(accountId)) return
         this.pendingVerifications.set(accountId, details)
         update({ status: 'incoming', deviceName: details.deviceDisplayName ?? details.senderProfile.displayName ?? details.deviceId })
       },
-      didAcceptVerificationRequest: () => { update({ status: 'accepted' }); void controller.startSasVerification().catch(error => this.events.error(accountId, errorText(error))) },
+      didAcceptVerificationRequest: () => { if (isRemovingSession(accountId)) return; update({ status: 'accepted' }); void controller.startSasVerification().catch(error => this.events.error(accountId, errorText(error))) },
       didStartSasVerification: () => update({ status: 'comparing' }),
       didReceiveVerificationData: data => {
         if (data.tag === 'Emojis') update({ status: 'compare', emojis: data.inner.emojis.map(emoji => ({ symbol: emoji.symbol(), description: emoji.description() })) })
@@ -1483,16 +1727,16 @@ export class MatrixEngine {
   // Sign out: revoke the server session when reachable, then always erase the
   // local account. Local erasure never throws for server failures, so a dead
   // network cannot strand credentials on this device.
-  async logout(accountId: string): Promise<{ serverRevoked: boolean }> {
+  async logout(accountId: string): Promise<LocalCleanupResult & { serverRevoked: boolean }> {
     let serverRevoked = false
     try { await this.getClient(accountId).logout(); serverRevoked = true } catch { serverRevoked = false }
-    await this.eraseLocal(accountId)
-    return { serverRevoked }
+    const cleanup = await this.eraseLocal(accountId)
+    return { ...cleanup, serverRevoked }
   }
   // Remove a local account without contacting the server, for sessions that
   // are already invalid or unreachable. Idempotent: unknown ids resolve.
-  async removeAccount(accountId: string) {
-    await this.eraseLocal(accountId)
+  async removeAccount(accountId: string): Promise<LocalCleanupResult> {
+    return this.eraseLocal(accountId)
   }
   // ---- Account registration, credentials and deactivation (#39) ----
   // First-party account REST over the saved session token. The SDK owns
@@ -1642,7 +1886,7 @@ export class MatrixEngine {
   // Irreversible server-side deactivation with password UIAA, then the same
   // isolated local erasure as sign-out. Callers confirm twice: the UI gates
   // on an explicit acknowledgment and the last-device warning.
-  async deactivate(accountId: string, password: string, erase: boolean): Promise<void> {
+  async deactivate(accountId: string, password: string, erase: boolean): Promise<LocalCleanupResult> {
     const sdk = await loadSdk()
     const userId = this.sessionOf(accountId).userId
     try {
@@ -1662,36 +1906,58 @@ export class MatrixEngine {
         throw error
       }
     }
-    await this.eraseLocal(accountId)
+    return this.eraseLocal(accountId)
   }
-  private async eraseLocal(accountId: string) {
+  private async eraseLocal(accountId: string): Promise<LocalCleanupResult> {
+    // Keep the public routing record until every deletion succeeds. A failed
+    // secret or database deletion must remain addressable after retry/reload.
+    const failures: unknown[] = []
+    const stages: CleanupStage[] = []
+    const attempt = async (stage: CleanupStage, work: () => unknown | Promise<unknown>) => {
+      try { await work() } catch (error) { failures.push(error); stages.push(stage) }
+    }
+    await attempt('tombstone', () => markSessionRemoving(accountId))
     this.attachTokens.set(accountId, (this.attachTokens.get(accountId) ?? 0) + 1)
-    // Records are keyed by store id, so the account id drops its own stores.
-    const storeId = savedAccounts()[accountId] ? accountId : undefined
-    await this.syncs.get(accountId)?.stop().catch(() => {})
-    this.handles.get(accountId)?.forEach(handle => { try { handle.cancel() } catch { /* Handles may already be stopped. */ } })
+    this.queueRecoveries.get(accountId)?.stop()
+    this.queueRecoveries.delete(accountId)
+    await attempt('sync-stop', () => this.syncs.get(accountId)?.stop())
+    for (const handle of this.handles.get(accountId) ?? []) await attempt('cancel-handles', () => handle.cancel())
     const timer = this.timers.get(accountId)
     if (timer) clearTimeout(timer)
-    this.roomLists.delete(accountId); this.verificationControllers.get(accountId)?.setDelegate(undefined); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
+    await attempt('detach-verification', () => this.verificationControllers.get(accountId)?.setDelegate(undefined))
+    this.roomLists.delete(accountId); this.verificationControllers.delete(accountId); this.pendingVerifications.delete(accountId)
     this.clients.delete(accountId); this.syncs.delete(accountId); this.handles.delete(accountId); this.timers.delete(accountId)
     this.refreshFailures.delete(accountId); this.refreshMarkedOffline.delete(accountId)
     for (const key of [...this.createdEncrypted]) if (key.startsWith(`${accountId}/`)) this.createdEncrypted.delete(key)
-    this.attachTokens.delete(accountId)
-    const entries = savedAccounts(); delete entries[accountId]; localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
-    await dropSecrets(accountId).catch(error => { this.events.error(accountId, `Removing the saved secret failed (${errorText(error)}). Remove the account again to retry.`) })
-    for (let index = localStorage.length - 1; index >= 0; index--) {
-      const key = localStorage.key(index)
-      if (key?.startsWith(draftPrefix(accountId))) localStorage.removeItem(key)
+    // Leave the incremented attachment token invalidating outstanding callbacks.
+    // Writes accepted before the tombstone must settle before the final delete.
+    let writesSettled = false
+    await attempt('secret-write-drain', async () => { await drainSessionWrites(accountId); writesSettled = true })
+    // Never race the final secret delete against an unresolved keychain write.
+    // Independent local cleanup still proceeds; tombstone and routing survive.
+    if (writesSettled) await attempt('secret-delete', () => dropSecrets(accountId, true))
+    await attempt('drafts', () => deleteSessionDrafts(accountId))
+    for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) {
+      await attempt('media-urls', () => URL.revokeObjectURL(url)); this.objectUrls.delete(key)
     }
-    for (const [key, url] of this.objectUrls) if (key.startsWith(`${accountId}/`)) { URL.revokeObjectURL(url); this.objectUrls.delete(key) }
     for (const map of [this.timelineCache, this.threadTimelines, this.eventCache, this.media]) for (const key of map.keys()) if (key.startsWith(`${accountId}/`)) map.delete(key)
-    // The dropped wrappers are collected while the remaining accounts keep
-    // syncing, which releases the connections so these deletions complete;
-    // callers poll indexedDB.databases() for absence.
-    if (storeId) await dropTempStore(storeId)
+    // Account IDs are store IDs. Always retry all three, even if a previous
+    // attempt erased secrets or the public routing record is already absent.
+    await Promise.all(([
+      ['', 'database-app'], ['::matrix-sdk-crypto', 'database-crypto'], ['::matrix-sdk-state', 'database-state'],
+    ] as const).map(([suffix, stage]) => attempt(stage, () => deleteExitDatabase(`fern-${accountId}${suffix}`))))
+    if (!failures.length) await attempt('routing', () => routingStorageLock(true, () => {
+      const entries = readSessionRecords(); delete entries[accountId]
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+    }))
+    if (stages.length && stages.every(stage => stage.startsWith('database-'))) return { status: 'restart-required' }
+    if (failures.length) throw new LocalCleanupError(failures, stages)
+    return { status: 'complete' }
   }
   async dispose() {
     this.alive = false
+    for (const recovery of this.queueRecoveries.values()) recovery.stop()
+    this.queueRecoveries.clear()
     this.oidcFlows.clear()
     this.ssoFlows.clear()
     for (const controller of this.verificationControllers.values()) controller.setDelegate(undefined)

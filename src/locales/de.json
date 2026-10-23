@@ -412,5 +412,41 @@
     "title": "Gute Gespräche beginnen hier",
     "subtitle": "Verbinde dein Matrix-Konto oder erstelle ein neues – oder sieh dich erst in der Demo um.",
     "explore": "Demo erkunden"
+  },
+  "sessionExit": {
+    "signoutTitle": "Diese Sitzung abmelden?",
+    "removeTitle": "Diese Sitzung von diesem Gerät entfernen?",
+    "signoutDescription": "Fern versucht, diese Sitzung auf dem Server abzumelden, und löscht danach ihre gespeicherten Zugangsdaten, Entwürfe und Verschlüsselungsschlüssel auf diesem Gerät. Ist der Server nicht erreichbar, kann die Sitzung dort aktiv bleiben.",
+    "removeDescription": "Dies löscht nur die lokalen Zugangsdaten, Entwürfe und Verschlüsselungsschlüssel. Die Sitzung wird nicht auf dem Server abgemeldet und dein Matrix-Konto wird nicht gelöscht.",
+    "historyWarning": "Der verschlüsselte Verlauf ist bei deiner Rückkehr möglicherweise nicht verfügbar, es sei denn, du hast einen funktionierenden Wiederherstellungsschlüssel oder ein anderes Gerät, das ihn wiederherstellen kann.",
+    "checking": "Wiederherstellungsstatus wird geprüft…",
+    "recovery": {
+      "Unknown": "Der Wiederherstellungsstatus konnte nicht bestätigt werden. Gehe nicht davon aus, dass dein verschlüsselter Verlauf wiederherstellbar ist.",
+      "Enabled": "Die Wiederherstellung ist eingerichtet. Stelle sicher, dass du einen funktionierenden Wiederherstellungsschlüssel gespeichert hast; diese Prüfung kann das nicht bestätigen.",
+      "Disabled": "Die Wiederherstellung ist für diese Sitzung nicht aktiviert.",
+      "Incomplete": "Die Einrichtung der Wiederherstellung ist unvollständig und muss geprüft werden."
+    },
+    "noBackup": "Es wurde keine Sicherung auf dem Server gefunden.",
+    "backupUnknown": "Die Serversicherung konnte nicht geprüft werden.",
+    "lastDevice": "Dies scheint dein letztes angemeldetes Gerät zu sein.",
+    "devicesUnknown": "Fern konnte nicht bestätigen, ob ein anderes Gerät verfügbar ist.",
+    "acknowledge": "Ich verstehe, dass lokale Daten gelöscht werden und verschlüsselter Verlauf verloren gehen kann.",
+    "review": "Wiederherstellung prüfen",
+    "signoutAction": "Abmelden und lokale Daten löschen",
+    "removeAction": "Lokale Sitzungsdaten löschen",
+    "errors": {
+      "failed": "Der Vorgang konnte nicht abgeschlossen werden. Prüfe deine Verbindung und Kontodaten, bevor du es erneut versuchst.",
+      "missing": "Diese Sitzung ist nicht mehr verfügbar. Wähle Abbrechen, um zu Fern zurückzukehren."
+    },
+    "localSession": "Lokale Sitzung: {id}",
+    "nativeWarning": "Schließe vor dem Fortfahren alle anderen Fern-Fenster und App-Instanzen. Die Entfernung kann die Löschung in anderen laufenden nativen Instanzen nicht überprüfen.",
+    "cleanupTitle": "Lokale Bereinigung nicht abgeschlossen",
+    "restartRequired": "Einige lokale Datenbanken sind noch geöffnet. Die lokalen Daten sind noch nicht vollständig gelöscht. Schließe andere Fern-Fenster und starte Fern neu, um die Bereinigung abzuschließen. Blockiert ein anderes Fenster die Löschung weiterhin, bleibt dieser Hinweis bestehen.",
+    "cleanupError": "Die lokale Bereinigung ist fehlgeschlagen. Die Serversitzung kann bereits abgemeldet oder das Konto deaktiviert sein. Gehe nicht davon aus, dass alle lokalen Daten gelöscht wurden. Wiederhole vor einem Neustart die lokale Bereinigung. Abmeldung und Deaktivierung werden dabei nicht erneut ausgeführt.",
+    "restart": "Fern zum Abschluss der Bereinigung neu starten",
+    "retryLocal": "Lokale Bereinigung wiederholen",
+    "serverStillActive": "Die Serversitzung kann weiterhin aktiv sein.",
+    "close": "Schließen",
+    "draftStorageError": "Ein Entwurf konnte nicht gespeichert oder geladen werden. Prüfe den Browserspeicher und versuche es vor einem Neustart erneut."
   }
 }
