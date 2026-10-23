@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { state, accountRooms, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo } from '../src/store'
+import { state, accountRooms, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, acknowledgeVisibleRoom } from '../src/store'
 
 const roomOf = (accountId: string, id: string) => state.rooms.find(item => item.accountId === accountId && item.id === id)!
 
@@ -28,6 +28,11 @@ describe('multi-account switching', () => {
     expect(accountMentions('demo-work')).toBe(1)
     switchAccount('demo-work')
     await selectRoom(work)
+    expect(work.unread).toBe(4)
+    expect(work.mentions).toBe(1)
+    expect(accountUnread('demo-work')).toBe(4)
+    acknowledgeVisibleRoom(state.messages[`${work.accountId}/${work.id}`].at(-1)!.id)
+    await Promise.resolve()
     expect(work.unread).toBe(0)
     expect(work.mentions).toBe(0)
     expect(accountUnread('demo-work')).toBe(0)

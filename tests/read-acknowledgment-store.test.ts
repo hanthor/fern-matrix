@@ -3,16 +3,19 @@ vi.mock('../src/applock', async importOriginal => ({ ...await importOriginal<typ
 import { acknowledgeVisibleRoom, appLocked, clearFocus, engine, focusMessage, roomReadReady, selectRoom, state, unlockApp } from '../src/store'
 import type { Account, Message, Room } from '../src/types'
 const message = (id = '$one'): Message => ({ id, sender: '@sender:x', name: 'Sender', body: id, timestamp: 1, own: false, kind: 'text', reactions: [] })
-const makeRoom = (): Room => ({ id: '!room:x', accountId: 'a', name: 'Room', topic: '', direct: false, space: false, encrypted: true, favorite: false, unread: 3, mentions: 1, members: 2, preview: '', timestamp: 0, membership: 'joined' })
+let fixtureNumber = 0
+let fixtureAccount = ''
+const makeRoom = (): Room => ({ id: '!room:x', accountId: fixtureAccount, name: 'Room', topic: '', direct: false, space: false, encrypted: true, favorite: false, unread: 3, mentions: 1, members: 2, preview: '', timestamp: 0, membership: 'joined' })
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done }); return { promise, resolve } }
 let update: (messages: Message[]) => void
 beforeEach(() => {
+  fixtureAccount = `read-fixture-${++fixtureNumber}`
   acknowledgeVisibleRoom(); clearFocus(); appLocked.value = false
   state.activeRoomId = ''
-  state.accounts = [{ id: 'a', name: 'A', userId: '@a:x', color: '#477962', connection: 'online' } as Account]
+  state.accounts = [{ id: fixtureAccount, name: 'A', userId: '@a:x', color: '#477962', connection: 'online' } as Account]
   state.rooms = [makeRoom()]
-  state.activeAccountId = 'a'
+  state.activeAccountId = fixtureAccount
   state.messages = {}; state.messageQuery = ''; state.error = ''
   vi.spyOn(engine, 'watchRoom').mockImplementation(async (_account, _room, onMessages) => { update = onMessages; onMessages([message()]); return vi.fn() })
   vi.spyOn(engine, 'markRead').mockResolvedValue(undefined)
@@ -32,7 +35,7 @@ describe('room read readiness and acknowledgment', () => {
     expect(engine.markEventRead).not.toHaveBeenCalled()
     expect(state.rooms[0].unread).toBe(3)
     acknowledgeVisibleRoom('$one'); await flush()
-    expect(engine.markEventRead).toHaveBeenCalledWith('a', '!room:x', '$one', expect.any(AbortSignal))
+    expect(engine.markEventRead).toHaveBeenCalledWith(fixtureAccount, '!room:x', '$one', expect.any(AbortSignal))
     expect(state.rooms[0].unread).toBe(3)
   })
   it('requires the handle even when the first snapshot arrives early', async () => {
