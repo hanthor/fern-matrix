@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { visibleEventBottom } from './read-acknowledgment'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { FrappeUIProvider, ToastProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
+import { FrappeUIProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
 import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert } from 'lucide-vue-next'
 import UserAvatar from './components/UserAvatar.vue'
 import FernFractal from './components/FernFractal.vue'
@@ -26,7 +26,7 @@ import { isTauri, onDeepLink, openExternal, checkAppUpdate, installAppUpdate } f
 import { useI18n } from 'vue-i18n'
 import { setLocale, localeNames, type Locale } from './i18n'
 import { accent, ACCENT_OPTIONS, setAccent } from './accent'
-import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
+import { state, account, accountName, room, isDemo, avatarUrl, openThread, closeThread, threadReply, paginateThread, downloadDiagnostics, retryConnection, accountRooms, filteredRooms, messages, visibleMessages, totalUnread, accountUnread, accountMentions, linkRoomAccounts, selectRoom, switchAccount, retireDemo, seedDemo, goToSuccessor, browserNotify, notifyPermission, quietAccounts, setAccountQuiet, enableBrowserNotify, maybeNotify, send, toggleFavorite, upload, sendVoice, sendLocation, mapProvider, setMapProvider, searchScope, accountSearchResults, focused, focusMessage, clearFocus, captureRoomNavigation, captureMessageFocus, ownsMessageFocusError, roomReadReady, acknowledgeVisibleRoom, threadReadReady, acknowledgeVisibleThread, pins, loadPins, unpinMessage, roomWidgets, widgetsLoading, loadRoomWidgets, isWidgetApproved, knockRequests, knocksLoading, answerKnockRequest, galleryFilter, galleryItems, forwardDialog, forwardRoomId, forwardTargets, cancelForward, confirmForward, createRoom, joinRoom, acceptInvite, leaveRoom, createPoll, pollHistory, openQr, signIn, signOut, removeAccount, retryPendingCleanup, approveWidget, registerAccount, changePassword, activeProviderManaged, emailAddresses, emailPending, loadEmails, addEmail, confirmEmail, removeEmail, accountDevices, loadDevices, signOutOthers, lastDeviceWarning, prepareDeactivate, deactivateAccount, roomSettings, loadRoomSettings, saveRoomSettings, moderateMember, setMemberPower, createSpace, organizeSpaceChild, messageKey, jumpToFirstUnread, appLocked, lockEnabled, lockTimeoutMin, lockNote, unlockApp, lockNow, setupAppPin, changeAppPin, disableAppPin, setLockTimeoutMin, roomNotifyState, notifyDefaultsState, mentionToggleState, loadAccountNotifySettings, setRoomNotifyMode, setAccountNotifyDefault, setMentionToggle, ignoredUsersState, loadIgnoredUsers, setIgnoredUser, reportMessage, typingNotice, action, engine, cancelUpload, refreshAvatar, initialize, react, remove, notify, download } from './store'
 const { colorScheme, setColorScheme } = useColorScheme()
 const modal = ref('')
 const modalOpen = computed({ get: () => Boolean(modal.value), set: value => { if (!value) { if (modal.value === 'verify') void closeVerification(); else modal.value = '' } } })
@@ -73,34 +73,102 @@ async function submitThread() {
 // Jump-to-message for search hits, pins and gallery items: switch rooms when
 // needed, open the focused context, then center the target event.
 let messageJumpGeneration = 0
-async function jumpToHit(hit: SearchHit) {
+let messageIntentGeneration = 0
+let messageNavigationDisposed = false
+let cancelPendingFocus: { generation: number; cancel: () => void } | undefined
+let jumpFlashTimer: ReturnType<typeof setTimeout> | undefined
+let jumpFlashElement: Element | undefined
+const pendingEventNavigation = ref<{ generation: number; owns: () => boolean }>()
+async function navigateToEvent(accountId: string, roomId: string, eventId: string): Promise<boolean> {
+  if (appLocked.value || messageNavigationDisposed) return false
+  const target = state.rooms.find(value => value.accountId === accountId && value.id === roomId && value.membership === 'joined')
+  if (!target || !state.accounts.some(value => value.id === accountId)) {
+    state.error = 'That joined room is no longer available in this account.'
+    return false
+  }
   const jump = ++messageJumpGeneration
+  // Suppress live-latest receipts throughout the explicit historical-event
+  // intent, including the interval before the room watch finishes selecting.
+  pendingEventNavigation.value = { generation: jump, owns: () => true }
   clearFocus()
-  const target = accountRooms.value.find(item => item.id === hit.roomId)
-  if (!target) return
-  const selection = target.id !== state.activeRoomId ? selectRoom(target) : undefined
+  const switchedAccount = accountId !== state.activeAccountId
+  if (switchedAccount) switchAccount(accountId)
+  const selection = switchedAccount || roomId !== state.activeRoomId ? selectRoom(target) : undefined
   const ownsNavigation = captureRoomNavigation()
-  const ready = await selection
-  if ((selection && !ready) || !ownsNavigation() || jump !== messageJumpGeneration) return
-  searchOpen.value = false; state.details = false
-  await jumpToEvent(hit.roomId, hit.message.id)
-}
-async function jumpToEvent(roomId: string, eventId: string) {
-  const jump = ++messageJumpGeneration
-  const ownsNavigation = captureRoomNavigation()
+  const ownsPriorFocus = captureMessageFocus()
+  state.mobileRoom = true
   state.details = false
   state.error = ''
-  let ready: boolean
-  try { ready = await focusMessage(roomId, eventId) }
-  catch (error) {
-    if (ownsNavigation() && jump === messageJumpGeneration) state.error = error instanceof Error ? error.message : String(error)
-    return
+  let intent = messageIntentGeneration
+  const ownsJump = () => !messageNavigationDisposed && ownsNavigation()
+    && jump === messageJumpGeneration && intent === messageIntentGeneration
+  let ownsFocusPhase = ownsPriorFocus
+  pendingEventNavigation.value = { generation: jump, owns: () => ownsJump() && ownsFocusPhase() }
+  try {
+    const selected = await selection
+    if ((selection && !selected) || !ownsJump() || !ownsPriorFocus()) return false
+    searchOpen.value = false
+    intent = messageIntentGeneration
+    const request = focusMessage(roomId, eventId)
+    const context = focused.value
+    ownsFocusPhase = () => focused.value === context
+    cancelPendingFocus = { generation: jump, cancel: () => {
+      if (context && focused.value === context) clearFocus()
+    } }
+    if (!await request || !ownsJump() || context !== focused.value) return false
+    if (!context || !await waitForFocusedEvent(context, eventId, ownsJump)) return false
+    await nextTick()
+    if (!ownsJump() || context !== focused.value) return false
+    const element = timeline.value?.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)
+    if (!element) {
+      state.error = 'The linked message could not be displayed. Try opening it again.'
+      return false
+    }
+    if (element) {
+      element.scrollIntoView({ block: 'center' })
+      jumpFlashElement?.classList.remove('jump-flash')
+      jumpFlashElement = element
+      element.classList.add('jump-flash')
+      clearTimeout(jumpFlashTimer)
+      jumpFlashTimer = setTimeout(() => element.classList.remove('jump-flash'), 2400)
+    }
+    return true
+  } catch (error) {
+    if (ownsJump() && (ownsMessageFocusError(error) ?? ownsFocusPhase())) state.error = error instanceof Error ? error.message : String(error)
+    return false
+  } finally {
+    if (cancelPendingFocus?.generation === jump) cancelPendingFocus = undefined
+    if (pendingEventNavigation.value?.generation === jump) pendingEventNavigation.value = undefined
   }
-  if (!ready || !ownsNavigation() || jump !== messageJumpGeneration) return
-  const context = focused.value
-  await nextTick()
-  if (!ownsNavigation() || jump !== messageJumpGeneration || context !== focused.value) return
-  timeline.value?.querySelector(`[data-message-id="${CSS.escape(eventId)}"]`)?.scrollIntoView({ block: 'center' })
+}
+function waitForFocusedEvent(context: NonNullable<typeof focused.value>, eventId: string, ownsJump: () => boolean): Promise<boolean> {
+  return new Promise(resolve => {
+    let done = false
+    let stop = () => {}
+    const finish = (ready: boolean) => {
+      if (done) return
+      done = true; clearTimeout(timer); stop(); resolve(ready)
+    }
+    const check = () => {
+      if (!ownsJump() || focused.value !== context) finish(false)
+      else if (context.messages.some(value => value.id === eventId)) finish(true)
+    }
+    const timer = setTimeout(() => {
+      if (ownsJump() && focused.value === context) state.error = 'The linked message could not be loaded. It may be unavailable or inaccessible.'
+      finish(false)
+    }, 15_000)
+    stop = watch(() => [focused.value, focused.value?.messages.some(value => value.id === eventId),
+      state.activeAccountId, state.activeRoomId, appLocked.value, state.messageQuery, state.thread,
+      state.details, state.mobileRoom, searchOpen.value, searchScope.value], check, { flush: 'sync' })
+    check()
+  })
+}
+async function jumpToHit(hit: SearchHit) {
+  const target = accountRooms.value.find(value => value.id === hit.roomId)
+  if (target) await navigateToEvent(target.accountId, target.id, hit.message.id)
+}
+async function jumpToEvent(roomId: string, eventId: string) {
+  return navigateToEvent(state.activeAccountId, roomId, eventId)
 }
 // First-unread pill: the anchor comes from the SDK notification count at
 // room open; jumping reuses the jumpToEvent scroll-and-flash machinery.
@@ -108,6 +176,8 @@ const unreadAnchor = computed(() => state.firstUnread[messageKey(state.activeAcc
 function jumpUnread() { jumpToFirstUnread(messageKey(state.activeAccountId, state.activeRoomId)) }
 const emojiTarget = ref<Message>()
 const searchOpen = ref(false)
+watch(() => [state.messageQuery, state.thread, state.details, state.mobileRoom, searchOpen.value, searchScope.value],
+  () => { ++messageIntentGeneration; cancelPendingFocus?.cancel() }, { flush: 'sync' })
 const timeline = ref<HTMLElement>()
 const threadPane = ref<HTMLElement>()
 const composer = ref<{ focus?: (options?: FocusOptions) => void }>()
@@ -281,13 +351,18 @@ function openLink(href: string) {
   else { pendingLink.value = { link, accounts: candidates }; open('link') }
 }
 function goToLink(accountId: string, link: Permalink) {
-  const target = state.rooms.find(item => item.accountId === accountId && item.id === link.target)
+  const target = state.rooms.find(item => item.accountId === accountId && item.id === link.target && item.membership === 'joined')
   if (!target) { notify('That room is not in this account'); return }
-  if (accountId !== state.activeAccountId) switchAccount(accountId)
-  reply.value = undefined; edit.value = undefined; endOfHistory.value = false; state.mobileRoom = true
-  void selectRoom(target)
-  if (link.kind === 'event' && link.eventId) state.jumpToEvent = link.eventId
+  reply.value = undefined; edit.value = undefined; endOfHistory.value = false
   modal.value = ''; pendingLink.value = undefined
+  if (link.kind === 'event' && link.eventId) {
+    state.messageQuery = ''
+    void navigateToEvent(accountId, target.id, link.eventId)
+    return
+  }
+  ++messageJumpGeneration; pendingEventNavigation.value = undefined
+  if (accountId !== state.activeAccountId) switchAccount(accountId)
+  void selectRoom(target)
 }
 function chooseFilter(value: string) { state.filter = value; state.spaceId = ''; state.mobileRoom = false }
 function chooseSpace(value: Room) { state.spaceId = state.spaceId === value.id ? '' : value.id; state.filter = 'all'; state.mobileRoom = false }
@@ -1018,30 +1093,14 @@ watch(() => messages.value.at(-1)?.id, (id, previous) => {
   const latest = messages.value.at(-1)
   if (latest && id !== previous && room.value) maybeNotify(state.activeAccountId, room.value, latest)
 })
-watch(() => [state.jumpToEvent, renderedMessages.value.length], async () => {
-  const id = state.jumpToEvent
-  if (!id || !timeline.value) return
-  // Expand the render window to cover the target first: explicit navigation
-  // wins over windowing, so event focus also works for older messages.
-  const position = visibleMessages.value.findIndex(message => message.id === id)
-  if (position >= 0) renderWindow.value = Math.max(renderWindow.value, visibleMessages.value.length - position + 20)
-  await nextTick()
-  let target = timeline.value.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-  let rounds = 0
-  while (!target && !endOfHistory.value && !isDemo.value && rounds < 5) {
-    await loadEarlier()
-    await nextTick()
-    target = timeline.value.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-    rounds += 1
-  }
-  const found = target
-  if (found) {
-    found.scrollIntoView({ block: 'center' })
-    found.classList.add('jump-flash')
-    setTimeout(() => found.classList.remove('jump-flash'), 2400)
-  } else notify('The linked message is not loaded in this room')
+watch(() => state.jumpToEvent, id => {
+  if (!id) return
+  const accountId = state.activeAccountId, roomId = state.activeRoomId
+  // Consume once before starting async work. A completed old jump must never
+  // clear a newer request, nor paginate whichever room happens to be active.
   state.jumpToEvent = ''
-})
+  void navigateToEvent(accountId, roomId, id)
+}, { flush: 'sync' })
 watch(modal, (_value, previous) => {
   if (previous === 'explore') { ++directoryGeneration; directorySession?.stop(); directorySession = undefined }
   if (previous === 'call') { ++callGeneration; stopCall?.(); stopCall = undefined; callIframe = undefined }
@@ -1087,7 +1146,7 @@ function eventReadGeometry(pane: HTMLElement, eventId: string) {
 function readTargetGeometry() {
   const pane = timeline.value
   if (!pane || !roomReadReady.value || !foregroundReadView() || focused.value || state.messageQuery.trim()
-    || state.details || (phoneLayout() && !state.mobileRoom)) return undefined
+    || pendingEventNavigation.value?.owns() || state.details || (phoneLayout() && !state.mobileRoom)) return undefined
   const latest = latestConfirmedReadEvent.value
   return latest && eventReadGeometry(pane, latest.id)
 }
@@ -1142,10 +1201,10 @@ function stopReadVisibility() {
   window.visualViewport?.removeEventListener('scroll', scheduleReadCheck)
 }
 watch(() => [timeline.value, threadPane.value, state.activeAccountId, state.activeRoomId, state.mobileRoom, appLocked.value,
-  roomReadReady.value, threadReadReady.value, focused.value, state.messageQuery, modal.value, forwardOpen.value, sessionExit.state.target,
+  roomReadReady.value, threadReadReady.value, pendingEventNavigation.value, focused.value, state.messageQuery, modal.value, forwardOpen.value, sessionExit.state.target,
   state.details, state.thread, latestConfirmedReadEvent.value?.id, latestConfirmedThreadEvent.value?.id, confirmedThreadEvents.value.length], scheduleReadCheck, { flush: 'sync' })
 onMounted(() => { startReadVisibility(); document.addEventListener('keydown', shortcut); document.addEventListener('pointerdown', pokeLock); document.addEventListener('keydown', pokeLock); watchLock(); window.addEventListener('message', onOidcMessage); window.visualViewport?.addEventListener('resize', viewportReveal); void onDeepLink(completeOidcFromUrl).then(stop => { stopDeepLink = stop ?? undefined }); void initialize(); void scrollToEnd() })
-onUnmounted(() => { stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
+onUnmounted(() => { messageNavigationDisposed = true; ++messageJumpGeneration; clearFocus(); pendingEventNavigation.value = undefined; clearTimeout(jumpFlashTimer); stopReadVisibility(); closeThread(); sessionExit.dispose(); document.removeEventListener('keydown', shortcut); document.removeEventListener('pointerdown', pokeLock); document.removeEventListener('keydown', pokeLock); watchLockStop(); window.removeEventListener('message', onOidcMessage); window.visualViewport?.removeEventListener('resize', viewportReveal); stopDeepLink?.(); stopCall?.(); directorySession?.stop(); if (verificationAccount) void engine.cancelVerification(verificationAccount); void engine.dispose() })
 </script>
 
 <template>
@@ -1226,7 +1285,6 @@ onUnmounted(() => { stopReadVisibility(); closeThread(); sessionExit.dispose(); 
     <aside v-if="state.details && room" class="details-panel" :aria-label="t('nav.roomDetails')"><template v-if="state.thread"><header><Button variant="ghost" :aria-label="t('details.backToConversation')" @click="closeThread"><ArrowLeft :size="18"/></Button><strong>{{ t('details.thread') }}</strong><Button variant="ghost" :aria-label="t('details.closeDetails')" @click="state.details = false"><PanelRightClose :size="18"/></Button></header><div class="thread-root"><span class="detail-label">{{ t('details.originalMessage') }}</span><p v-if="state.thread.root"><strong>{{ state.thread.root.name }}</strong> {{ state.thread.root.body }}</p><p v-else>{{ t('details.originalMissing') }}</p></div><div ref="threadPane" class="thread-replies" @scroll.passive="scheduleReadCheck"><Button v-if="!state.thread.end && !state.thread.loading" variant="ghost" @click="paginateThread">{{ t('details.loadEarlierReplies') }}</Button><span v-if="state.thread.loading" class="thread-loading">{{ t('details.loadingThread') }}</span><MessageRow v-for="message in state.thread.messages.filter(item => item.threadRoot)" :key="message.id" :message="message" :room-id="state.thread.roomId" @reply="beginThreadReply" @edit="beginEdit" @emoji="showEmoji" @remove="removal = $event; open('remove')" @link="openLink" @report="beginReport"/></div><div v-if="threadReplyTo" class="composer-context"><span>{{ t('composer.replying', { name: threadReplyTo.name }) }}</span><Button variant="ghost" :aria-label="t('details.cancelThreadReply')" @click="threadReplyTo = undefined"><X :size="14"/></Button></div><form class="thread-composer" @submit.prevent="submitThread"><FormControl v-model="threadDraft" type="textarea" :rows="2" :placeholder="t('details.threadPlaceholder')" :aria-label="t('details.threadComposer')"/><Button variant="solid" theme="green" type="submit" :aria-label="t('details.sendThreadReply')" :disabled="!threadDraft.trim()"><Send :size="16"/></Button></form></template><template v-else><header><strong>{{ t('nav.roomDetails') }}</strong><Button variant="ghost" :aria-label="t('details.closeDetails')" @click="state.details = false"><PanelRightClose :size="18"/></Button></header><div class="details-hero"><span class="details-icon"><Hash v-if="!room.direct" :size="33"/><UserAvatar v-else :name="room.name" :size="58"/></span><h2>{{ room.name }}</h2><p>{{ t('details.membersN', { count: room.members }) }}</p><span class="encrypted-chip"><LockKeyhole v-if="room.encrypted" :size="12"/><Globe v-else :size="12"/>{{ room.encrypted ? t('details.encryptedRoom') : t('details.publicRoom') }}</span></div><div class="details-tabs"><Button v-for="tab in [{ id: 'about', label: t('details.tabAbout') }, { id: 'members', label: t('details.tabMembers') }, { id: 'pins', label: t('details.tabPins') }, { id: 'polls', label: t('details.tabPolls') }, { id: 'media', label: t('details.tabMedia') }, { id: 'widgets', label: t('details.tabWidgets') }]" :key="tab.id" variant="ghost" :class="{ selected: detailsTab === tab.id }" :aria-current="detailsTab === tab.id ? 'true' : undefined" @click="selectDetailsTab(tab.id)">{{ tab.label }}</Button></div><div class="details-body"><template v-if="detailsTab === 'about'"><span class="detail-label">{{ t('details.aboutRoom') }}</span><p>{{ room.topic || t('details.noTopic') }}</p><span class="detail-label">{{ t('details.roomId') }}</span><code>{{ isDemo ? t('details.localDemoRoom') : room.id }}</code><Button variant="ghost" class="detail-action" @click="toggleFavorite(room)"><Star :size="17"/>{{ room.favorite ? t('nav.removeFavorite') : t('nav.addFavorite') }}</Button><Button variant="ghost" class="detail-action" @click="open('invite')"><Users :size="17"/>{{ t('details.invitePeople') }}</Button><div class="privacy-card"><ShieldCheck :size="22"/><h3>{{ t('details.privacyTitle') }}</h3><p>{{ isDemo ? t('details.privacyDemo') : room.encrypted ? t('details.privacyEncrypted') : t('details.privacyPublic') }}</p></div><Button variant="ghost" theme="red" class="detail-action" @click="open('leave')"><LogOut :size="17"/>{{ t('nav.leaveRoom') }}</Button></template><template v-if="detailsTab === 'members'"><div class="members-heading"><span class="detail-label">{{ t('details.peopleInRoom') }}</span><Button variant="ghost" :aria-label="t('details.inviteMember')" @click="open('invite')"><Plus :size="16"/></Button></div><div v-for="member in state.members" :key="member.id" class="member-row"><UserAvatar :name="member.name" :size="34" :image="avatarUrl(state.activeAccountId, member.id)"/><span><strong>{{ member.name }}</strong><small>{{ member.role }}{{ ignoredUsersState.includes(member.id) ? ' · ignored' : '' }}</small></span><Button v-if="member.id !== account?.userId && !ignoredUsersState.includes(member.id)" variant="ghost" @click="submitIgnore(member.id, true)">Ignore</Button><Button v-if="ignoredUsersState.includes(member.id)" variant="ghost" @click="submitIgnore(member.id, false)">Unignore</Button></div><p v-if="!state.members.length">{{ t('details.membersSync') }}</p></template><template v-if="detailsTab === 'pins'"><span class="detail-label">{{ t('details.pinnedMessages') }}</span><p v-if="pins.length && !pins[0].canPin" class="form-note">{{ t('details.unpinNeedsPower') }}</p><div v-for="pin in pins" :key="pin.eventId" class="shared-file"><FileText :size="21"/><span v-if="pin.message"><strong>{{ pin.message.body.slice(0, 90) }}</strong><small>{{ pin.message.name }}</small></span><span v-else><strong>{{ t('details.unavailable') }}</strong><small>{{ t('details.removedUnsynced') }}</small></span><Button v-if="pin.message" variant="ghost" :aria-label="t('details.jumpToPinned')" @click="jumpToEvent(room.id, pin.eventId)">{{ t('details.jump') }}</Button><Button variant="ghost" :disabled="!pin.canPin" :title="pin.canPin ? undefined : t('details.unpinNeedsPower')" :aria-label="t('details.unpinMessage') + (pin.canPin ? '' : t('details.unpinPowerSuffix'))" @click="unpinMessage(pin.eventId)">{{ t('details.unpin') }}</Button></div><p v-if="!pins.length">{{ t('details.noPins') }}</p></template><template v-if="detailsTab === 'polls'"><span class="detail-label">{{ t('details.pollHistory') }}</span><div v-for="poll in pollHistory" :key="poll.id" class="shared-file"><span v-if="poll.poll"><strong>{{ poll.poll.question }}</strong><small>{{ poll.name }} · {{ poll.poll.ended ? t('details.pollEnded') : t('details.pollOpen') }}{{ poll.poll.kind === 'undisclosed' ? t('details.undisclosedSuffix') : '' }}</small></span><Button variant="ghost" :aria-label="t('details.jumpToPoll')" @click="jumpToEvent(room.id, poll.id)">{{ t('details.jump') }}</Button></div><p v-if="!pollHistory.length">{{ t('details.noPolls') }}</p><Button v-if="!endOfHistory" variant="ghost" @click="loadEarlier">{{ t('details.loadMoreHistory') }}</Button></template><template v-if="detailsTab === 'widgets'"><span class="detail-label">{{ t('details.roomWidgets') }}</span><p v-if="widgetsLoading" class="form-note">{{ t('details.loadingWidgets') }}</p><div v-for="widget in roomWidgets" :key="widget.id" class="member-row"><LayoutGrid :size="17"/><span><strong>{{ widget.name }}</strong><small>{{ widget.kind === 'element_call' ? 'Element Call' : widget.kind === 'jitsi' ? 'Jitsi' : t('details.unsupportedWidget') }} · {{ t('details.addedBy', { sender: widget.sender }) }}</small></span><Button variant="outline" :aria-label="t('details.openWidget', { name: widget.name })" @click="openWidget(widget)">{{ t('details.open') }}</Button></div><p v-if="!roomWidgets.length && !widgetsLoading" class="form-note">{{ t('details.noWidgets') }}</p><p class="form-note">{{ t('details.widgetsNote') }}</p></template><template v-if="detailsTab === 'media'"><span class="detail-label">{{ t('details.sharedInLoaded') }}</span><div class="search-scope" role="group" :aria-label="t('details.galleryFilter')"><Button variant="ghost" :class="{ selected: galleryFilter === 'all' }" @click="galleryFilter = 'all'">{{ t('nav.filterAll') }}</Button><Button variant="ghost" :class="{ selected: galleryFilter === 'media' }" @click="galleryFilter = 'media'">{{ t('details.filterMedia') }}</Button><Button variant="ghost" :class="{ selected: galleryFilter === 'files' }" @click="galleryFilter = 'files'">{{ t('details.filterFiles') }}</Button></div><div v-for="item in galleryItems" :key="item.id" class="shared-file"><img v-if="item.kind === 'image' && item.attachment?.url" :src="item.attachment.url" :alt="item.attachment.name" loading="lazy" class="gallery-thumb"/><FileText v-else :size="21"/><span><strong>{{ item.attachment?.name }}</strong><small>{{ item.name }}</small></span><Button variant="ghost" :aria-label="t('details.jumpToMessage')" @click="jumpToEvent(room.id, item.id)">{{ t('details.jump') }}</Button><Button variant="ghost" :aria-label="t('details.downloadFile')" @click="download(item)"><Download :size="15"/></Button></div><p v-if="!galleryItems.length">{{ t('details.noSharedFiles') }}</p><Button v-if="!endOfHistory" variant="ghost" @click="loadEarlier">{{ t('details.loadMoreHistory') }}</Button></template></div></template></aside>
     </template>
 
-    <ToastProvider/>
   </div>
 
   <Dialog v-model:open="modalOpen" :title="dialogTitle" :size="modal === 'call' || modal === 'widget' ? '5xl' : modal === 'settings' ? '2xl' : 'lg'">

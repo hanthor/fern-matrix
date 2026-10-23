@@ -348,12 +348,25 @@ export function acknowledgeVisibleRoom(eventId?: string) {
 }
 // A lease, not a route: delayed UI work must not follow the user into another
 // account/room or survive a leave-and-return to the same view.
+export function captureMessageFocus() {
+  const generation = focusGeneration
+  return () => generation === focusGeneration
+}
 export function captureRoomNavigation() {
   const generation = navigationGeneration
   const accountId = state.activeAccountId
   const roomId = state.activeRoomId
   return () => generation === navigationGeneration && accountId === state.activeAccountId
     && roomId === state.activeRoomId && !appLocked.value
+}
+class MessageFocusError extends Error {
+  constructor(error: unknown, readonly isCurrent: () => boolean) {
+    super(error instanceof Error ? error.message : String(error))
+    this.name = 'MessageFocusError'
+  }
+}
+export function ownsMessageFocusError(error: unknown): boolean | undefined {
+  return error instanceof MessageFocusError ? error.isCurrent() : undefined
 }
 export async function focusMessage(roomId: string, eventId: string): Promise<boolean> {
   clearFocus()
@@ -385,7 +398,9 @@ export async function focusMessage(roomId: string, eventId: string): Promise<boo
     // A stale failure belongs to the abandoned view, not to the current one.
     if (!ownsFocus()) return false
     clearFocus()
-    throw error
+    // Preserve the failure's ownership across the caller's await continuation.
+    // A newer direct focus may start after this throw but before its catch runs.
+    throw new MessageFocusError(error, captureMessageFocus())
   }
 }
 export function clearFocus() {
@@ -540,6 +555,7 @@ export function noteFirstUnread(key: string, messages: Message[], unread: number
   else delete state.firstUnread[key]
 }
 export function jumpToFirstUnread(key: string) {
+  if (appLocked.value || key !== messageKey(state.activeAccountId, state.activeRoomId)) return false
   const anchor = state.firstUnread[key]
   if (!anchor) return false
   delete state.firstUnread[key]

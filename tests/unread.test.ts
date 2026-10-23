@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { state, firstUnreadAnchor, noteFirstUnread, jumpToFirstUnread, selectRoom, messageKey, acknowledgeVisibleRoom } from '../src/store'
+import { state, firstUnreadAnchor, noteFirstUnread, jumpToFirstUnread, selectRoom, messageKey, acknowledgeVisibleRoom, appLocked } from '../src/store'
 import type { Message } from '../src/types'
 
 // First-unread jump (#41): the anchor derives from the SDK notification
@@ -24,12 +24,26 @@ describe('firstUnreadAnchor', () => {
 describe('unread pill state', () => {
   it('notes and consumes the anchor', () => {
     const messages = ['m1', 'm2', 'm3'].map(message)
-    noteFirstUnread('a/r', messages, 1)
-    expect(state.firstUnread['a/r']).toEqual({ id: 'm3', count: 1 })
-    expect(jumpToFirstUnread('a/r')).toBe(true)
+    const key = messageKey(state.activeAccountId, state.activeRoomId)
+    noteFirstUnread(key, messages, 1)
+    expect(state.firstUnread[key]).toEqual({ id: 'm3', count: 1 })
+    expect(jumpToFirstUnread(key)).toBe(true)
     expect(state.jumpToEvent).toBe('m3')
-    expect(state.firstUnread['a/r']).toBeUndefined()
+    expect(state.firstUnread[key]).toBeUndefined()
     state.jumpToEvent = ''
+  })
+
+  it('does not consume another view or locked-room anchor', () => {
+    const key = messageKey(state.activeAccountId, state.activeRoomId)
+    noteFirstUnread('foreign/room', [message('foreign')], 1)
+    expect(jumpToFirstUnread('foreign/room')).toBe(false)
+    expect(state.firstUnread['foreign/room']?.id).toBe('foreign')
+    noteFirstUnread(key, [message('locked')], 1)
+    appLocked.value = true
+    try {
+      expect(jumpToFirstUnread(key)).toBe(false)
+      expect(state.firstUnread[key]?.id).toBe('locked')
+    } finally { appLocked.value = false; delete state.firstUnread[key]; delete state.firstUnread['foreign/room'] }
   })
 
   it('refuses to jump without an anchor', () => {
