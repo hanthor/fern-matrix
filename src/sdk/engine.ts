@@ -61,6 +61,24 @@ export function isCallMessage(event: { origin: string; source: unknown; data?: {
   return !!event.data && event.origin === widgetOrigin && event.source === iframeWindow
     && event.data.widgetId === widgetId
 }
+// Bounded FIFO caches: timeline-derived lookups are only useful for recent
+// events, and object URLs pin decrypted media bytes in memory, so none of
+// these may grow for the life of the tab. An eviction miss behaves exactly
+// like the existing "no longer in the timeline / not synced" paths, and a
+// later download simply re-fetches. The object-URL cap is generous so a URL
+// handed to a visible message is not revoked out from under it in practice.
+export const EVENT_CACHE_LIMIT = 3000
+export const OBJECT_URL_LIMIT = 250
+export function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, limit: number, onEvict?: (value: V) => void) {
+  if (map.has(key)) map.delete(key)
+  else if (map.size >= limit) {
+    const oldest = map.keys().next().value as K
+    const evicted = map.get(oldest)
+    map.delete(oldest)
+    if (evicted !== undefined) onEvict?.(evicted)
+  }
+  map.set(key, value)
+}
 export function exactBytes(bytes: Uint8Array): ArrayBuffer {
   const exact = new Uint8Array(bytes.byteLength)
   exact.set(bytes)
@@ -791,7 +809,7 @@ export class MatrixEngine {
     const identity = event.eventOrTransactionId
     const id = identity.tag === 'EventId' ? identity.inner.eventId : identity.inner.transactionId
     const cacheKey = `${accountId}/${roomId}/${id}`
-    this.eventCache.set(cacheKey, event)
+    boundedSet(this.eventCache, cacheKey, event, EVENT_CACHE_LIMIT)
     const profile = event.senderProfile
     const result: Message = { id, sender: event.sender, name: profile.tag === 'Ready' ? profile.inner.displayName ?? event.sender : event.sender, body: '', timestamp: Number(event.timestamp), own: event.isOwn, kind: 'notice', reactions: [], read: event.readReceipts.size }
     if (event.localSendState?.tag === 'NotSentYet') result.status = 'sending'
@@ -841,7 +859,7 @@ export class MatrixEngine {
           if (details?.waveform?.length) result.attachment.waveform = details.waveform.map(value => Math.round((Math.min(1024, Math.max(0, value)) / 1024) * 1000) / 1000)
           if ((media as { voice?: unknown }).voice) result.attachment.voice = true
         }
-        this.media.set(cacheKey, media.source)
+        boundedSet(this.media, cacheKey, media.source, EVENT_CACHE_LIMIT)
       }
     } else if (kind.tag === 'Poll') {
       result.kind = 'poll'
@@ -1188,7 +1206,7 @@ export class MatrixEngine {
     const bytes = await this.getClient(accountId).getMediaContent(source)
     if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: safeMediaMime(message.attachment?.mime) }))
-    this.objectUrls.set(key, url)
+    boundedSet(this.objectUrls, key, url, OBJECT_URL_LIMIT, evicted => URL.revokeObjectURL(evicted))
     return url
   }
   // Authenticated profile picture through the client's media API. Cached per
@@ -1205,7 +1223,7 @@ export class MatrixEngine {
     const bytes = await this.getClient(accountId).getMediaContent(sdk.MediaSource.fromUrl(profile.avatarUrl))
     if (isRemovingSession(accountId)) throw new Error('Session removed.')
     const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
-    this.objectUrls.set(key, url)
+    boundedSet(this.objectUrls, key, url, OBJECT_URL_LIMIT, evicted => URL.revokeObjectURL(evicted))
     return url
   }
   forgetAvatar(accountId: string, userId: string) {

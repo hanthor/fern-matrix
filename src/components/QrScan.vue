@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from 'vue'
 import { Button, ErrorMessage, LoadingIndicator } from 'frappe-ui'
-import { Camera, QrCode, Upload } from 'lucide-vue-next'
+import { Camera, QrCode, Upload } from '@lucide/vue'
 import { decodeQrFile, scanQrCamera, type QrCamera } from '../qr'
 import { closeQr, openQr, qrFlow, state, submitQrBytes, type QrRole } from '../store'
 const props = defineProps<{ role: QrRole; server?: string; redirectUri?: string; logicalServer?: boolean }>()

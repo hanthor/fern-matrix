@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { Alert, Button, LoadingIndicator } from 'frappe-ui'
-import { LayoutGrid, PhoneOff, RotateCcw, X } from 'lucide-vue-next'
+import { LayoutGrid, PhoneOff, RotateCcw, X } from '@lucide/vue'
 import { unsupportedWidgetMessage, widgetCapabilitiesSummary, type WidgetInfo, type WidgetKind } from '../widgets'
 
 // Room widget surface (#45): Fern owns approval, header, loading, error and

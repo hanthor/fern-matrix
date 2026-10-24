@@ -2,7 +2,7 @@
 import { visibleEventBottom } from './read-acknowledgment'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FrappeUIProvider, Button, Dialog, FormControl, Dropdown, Switch, Badge, Tooltip, Alert, ErrorMessage, LoadingIndicator, useColorScheme } from 'frappe-ui'
-import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert, QrCode } from 'lucide-vue-next'
+import { ArrowLeft, ArrowUpRight, Bell, ChevronDown, ChevronRight, CircleHelp, Command, Download, FileText, Hash, Headphones, RefreshCw, Video, Home, Info, Leaf, LockKeyhole, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Search, Send, Settings, ShieldCheck, Smile, Sparkles, Star, Sun, Users, X, Paperclip, ListFilter, Inbox, Globe, PanelRightClose, Mic, Pause, Play, Square, Trash2, MapPin, LayoutGrid, ShieldAlert, QrCode } from '@lucide/vue'
 import UserAvatar from './components/UserAvatar.vue'
 import { loginDestination, type LoginDestination } from './login'
 import LoginFields from './components/LoginFields.vue'
