@@ -32,7 +32,7 @@ Browser tests use Playwright's installed Chromium, or `FERN_CHROMIUM_PATH` when 
 
 ## Install
 
-[v0.1.0](https://github.com/hanthor/fern-matrix/releases/tag/v0.1.0) ships signed Linux (deb, AppImage with auto-update) and Android (APK, AAB) builds from CI. Releases are cut by pushing a version tag — `node scripts/cut-release.mjs 0.1.0` sync-checks `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` first — which drives the signed desktop and mobile pipelines (see `docs/NATIVE.md`).
+[The latest release](https://github.com/hanthor/fern-matrix/releases/latest) ships signed Linux (deb, AppImage with auto-update) and Android (APK, AAB) builds from CI. Releases are cut by pushing a version tag — `node scripts/cut-release.mjs <x.y.z>` sync-checks `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` first — which drives the signed desktop and mobile pipelines (see `docs/NATIVE.md`).
 
 **Testing signatures.** This release is signed with testing-only keys so the pipelines run end to end: a local minisign keypair for the desktop updater and an upload keystore for Android, held as CI secrets. They prove the mechanism, not a trust chain — rotate every key and secret before any production release or store upload.
 
