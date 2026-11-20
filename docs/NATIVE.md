@@ -79,8 +79,10 @@ execution, platform restrictions, updates and signing.
   with #30.
 - Android launcher icons are re-rendered from `src-tauri/icons/icon.png` by
   `scripts/sync_android_icons.py` (the scaffolded Tauri robot art is fully
-  replaced, including adaptive `mipmap-anydpi-v26` definitions); re-run the
-  script after any icon source change and commit the outputs.
+  replaced, including adaptive `mipmap-anydpi-v26` definitions); CI runs the
+  script after every `android init` (the generated `gen/android` tree is
+  gitignored, so there is nothing to commit — just re-check the APK icon
+  after any icon source change).
 - Edge-to-edge Android webviews are handled in CSS: `.app-shell` and the
   fullscreen mobile details panel pad `env(safe-area-inset-top)` so content
   clears the status bar (bottom insets were already on the composer and
