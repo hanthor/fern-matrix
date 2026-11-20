@@ -52,6 +52,14 @@ def main():
             "federation_domain_whitelist": [], "suppress_key_server_warning": True,
             "trusted_key_servers": [], "enable_metrics": False,
             "room_list_publication_rules": [{"action": "allow"}],
+            # Test-only workload limits. These remain finite and never apply
+            # to a deployed homeserver; the fixture binds loopback only.
+            "rc_room_creation": {"per_second": 100, "burst_count": 1000},
+            "rc_joins": {key: {"per_second": 100, "burst_count": 1000}
+                         for key in ["local", "remote"]},
+            "rc_joins_per_room": {"per_second": 100, "burst_count": 1000},
+            "rc_invites": {key: {"per_second": 100, "burst_count": 1000}
+                           for key in ["per_room", "per_user", "per_issuer"]},
             "rc_message": {"per_second": 100, "burst_count": 1000},
             "rc_admin_redaction": {"per_second": 100, "burst_count": 1000},
             "rc_login": {key: {"per_second": 100, "burst_count": 1000}
@@ -76,7 +84,10 @@ def main():
             if not versions.get("unstable_features", {}).get("org.matrix.simplified_msc3575"):
                 raise RuntimeError("Pinned Synapse does not advertise native sliding sync")
             users = []
-            for username, admin in [("alice", False), ("bob", False), ("reference", False), ("admin", True)]:
+            scenario_users = {}
+            for username, admin in [("alice", False), ("bob", False), ("reference", False), ("admin", True),
+                                    ("backup-migration", False), ("verification-accept", False),
+                                    ("verification-cancel", False), ("verification-reject", False)]:
                 password = secrets.token_urlsafe(32)
                 nonce = api(base, "/_synapse/admin/v1/register")["nonce"]
                 mac = hmac.new(shared_secret.encode(), digestmod=hashlib.sha1)
@@ -86,12 +97,21 @@ def main():
                     "nonce": nonce, "username": username, "password": password, "admin": admin,
                     "mac": mac.hexdigest(),
                 })
-                users.append({"username": username, "password": password, "userId": registered["user_id"],
-                              "token": registered["access_token"]})
+                user = {"username": username, "password": password, "userId": registered["user_id"],
+                        "token": registered["access_token"]}
+                scenario_names = {"backup-migration": "backupMigration",
+                                  "verification-accept": "verificationAccept",
+                                  "verification-cancel": "verificationCancel",
+                                  "verification-reject": "verificationReject"}
+                if username in scenario_names:
+                    scenario_users[scenario_names[username]] = user
+                else:
+                    users.append(user)
             # Credentials only in a mode-0600 temporary file; never in stdout, args or CI logs.
             descriptor = os.open(ready, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w") as output:
-                json.dump({"base": base, "version": "1.161.0", "users": users}, output)
+                json.dump({"base": base, "version": "1.161.0", "users": users,
+                           "scenarioUsers": scenario_users}, output)
             print("Disposable Synapse ready (native sliding sync)", flush=True)
             child.wait()
     finally:

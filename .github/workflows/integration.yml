@@ -32,7 +32,18 @@ jobs:
           .cache/fern-synapse/bin/pip install -r tests/integration/requirements.txt
       - run: npx playwright install --with-deps chromium
       - run: npm test
-      - run: npm run test:e2e
+      - name: Diagnose session cleanup against the real SDK
+        continue-on-error: true
+        run: npm run test:integration -- --grep "live password login|removing one account|email capability and local removal|authenticated avatars"
+      - run: npm run test:e2e -- --reporter=line
+      - name: Save signed-out entry artwork screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entry-artwork
+          path: test-results/**/entry-*.png
+          if-no-files-found: ignore
+          retention-days: 7
       - run: npm run test:integration
       - run: npm run test:sso
       - run: npm run build
@@ -59,6 +70,11 @@ jobs:
           git -C .cache/spindle fetch -q --depth 1 origin "$SPINDLE_REV"
           git -C .cache/spindle checkout -q FETCH_HEAD
           git -C .cache/spindle rev-parse HEAD
-          cargo build --release --manifest-path .cache/spindle/Cargo.toml -p spindle-server --bin spindle
+          # Run inside the checkout so rustup honors Spindle's pinned toolchain.
+          # --manifest-path alone leaves toolchain discovery at the Fern root.
+          cd .cache/spindle
+          rustc --version
+          cargo --version
+          cargo build --locked --release -p spindle-server --bin spindle
       - run: FERN_SPINDLE_BIN=$PWD/.cache/spindle/target/release/spindle npm run test:oidc
       # Intentionally no trace/HAR/server-log upload: those can expose sessions.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { Button, Dropdown, Tooltip } from 'frappe-ui'
-import { Reply, SmilePlus, MoreHorizontal, FileText, Download, CheckCheck, Pencil, Pin, Trash2, Copy, MessageSquare, Play, MapPin, Forward, Share2, Flag } from 'lucide-vue-next'
+import { Reply, SmilePlus, MoreHorizontal, FileText, Download, CheckCheck, Pencil, Pin, Trash2, Copy, MessageSquare, Play, MapPin, Forward, Share2, Flag } from '@lucide/vue'
 import UserAvatar from './UserAvatar.vue'
 import type { Message } from '../types'
 import { sanitizeHtml, linkifyText, stripReplyFallback, parsePermalink } from '../format'

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { Alert, Button, LoadingIndicator } from 'frappe-ui'
-import { Globe, LockKeyhole, PhoneOff, RotateCcw, Video, X } from 'lucide-vue-next'
+import { Globe, LockKeyhole, PhoneOff, RotateCcw, Video, X } from '@lucide/vue'
 import UserAvatar from './UserAvatar.vue'
 
 // Re-skinned room-call surface (#46): Fern owns the lobby, header, loading,

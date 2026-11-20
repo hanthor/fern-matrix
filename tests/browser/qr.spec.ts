@@ -72,7 +72,7 @@ test('qr sign-in is a distinct login entry point', async ({ page }) => {
   await page.getByRole('button', { name: 'Open settings' }).click()
   await page.getByRole('button', { name: 'Accounts', exact: true }).click()
   await page.getByRole('button', { name: 'Add account' }).click()
-  await page.getByRole('button', { name: 'Sign in with QR code' }).click()
+  await page.getByRole('button', { name: 'Scan QR code to sign in' }).click()
   await expect(page.getByRole('heading', { name: 'Sign in with QR code' })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Sign in with QR code' })
     .getByText('Scan the code on your other device')).toBeVisible()

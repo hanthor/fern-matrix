@@ -1,5 +1,6 @@
 import { test, expect, type Page, type Browser } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { finishLocalCleanup } from './cleanup'
 import type { MatrixEngine } from '../../src/sdk/engine'
 import type { Account, Room, Message } from '../../src/types'
 
@@ -192,7 +193,9 @@ test('deactivation removes a provisioned account', async ({ browser }: { browser
       .rejects.toThrow('not accepted')
     expect(await restLogin(userId, 'gone-gone-4')).toBe(200)
     // The real deactivation erases server-side and locally.
-    await page.evaluate(({ id }) => window.matrixTest.engine.deactivate(id, 'gone-gone-4', true), { id })
+    const cleanup = await page.evaluate(({ id }) => window.matrixTest.engine.deactivate(id, 'gone-gone-4', true), { id })
+    expect(['complete', 'restart-required']).toContain(cleanup.status)
+    await finishLocalCleanup(page, id, boot)
     await expect.poll(() => restLogin(userId, 'gone-gone-4'), { timeout: 30_000 }).toBe(403)
     await page.evaluate(() => window.matrixTest.engine.dispose())
   } finally {
@@ -216,10 +219,13 @@ test('email capability and local removal isolation', async ({ browser }: { brows
     await expect(page.evaluate(id => window.matrixTest.engine.requestEmailToken(id, 'nobody@example.org', 'secret-1'), a))
       .rejects.toThrow(/could not send|does not support|disabled/i)
     // Local removal erases one account and leaves the other syncing.
-    await page.evaluate(id => window.matrixTest.engine.removeAccount(id), a)
+    const cleanup = await page.evaluate(id => window.matrixTest.engine.removeAccount(id), a)
+    expect(['complete', 'restart-required']).toContain(cleanup.status)
     await expect(page.evaluate(id => window.matrixTest.engine.devices(id), b)).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ current: true })]))
-    await expect(page.evaluate(id => window.matrixTest.engine.devices(id), a)).rejects.toThrow('not signed in')
+    await expect(page.evaluate(id => window.matrixTest.engine.devices(id), a)).rejects.toThrow(/not signed in|being removed/)
+    await finishLocalCleanup(page, a, boot)
+    await expect.poll(() => page.evaluate(id => window.matrixTest.accounts[id]?.connection, b)).toBe('online')
     const relogin = await login(page, alice)
     expect(typeof relogin).toBe('string')
     await page.evaluate(() => window.matrixTest.engine.dispose())

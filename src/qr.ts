@@ -58,25 +58,30 @@ export interface QrCamera { stop(): void }
 
 // Live camera scan loop. Resolves each decoded payload through onBytes and
 // stops the camera on the first hit; callers keep the loop for empty frames.
-export async function scanQrCamera(video: HTMLVideoElement, onBytes: (bytes: Uint8Array) => void): Promise<QrCamera> {
+export async function scanQrCamera(video: HTMLVideoElement, onBytes: (bytes: Uint8Array) => void, signal?: AbortSignal): Promise<QrCamera> {
   let stream: MediaStream
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
   } catch (error) {
     throw new Error(qrCameraError(error))
   }
-  video.srcObject = stream
-  await video.play().catch(() => {})
-  const canvas = document.createElement('canvas')
-  const context = canvas.getContext('2d', { willReadFrequently: true })
   let stopped = false
   let frame = 0
   const stop = () => {
+    if (stopped) return
     stopped = true
     cancelAnimationFrame(frame)
     stream.getTracks().forEach(track => track.stop())
-    video.srcObject = null
+    if (video.srcObject === stream) video.srcObject = null
+    signal?.removeEventListener('abort', stop)
   }
+  if (signal?.aborted) { stop(); return { stop } }
+  signal?.addEventListener('abort', stop, { once: true })
+  video.srcObject = stream
+  await video.play().catch(() => {})
+  if (stopped) return { stop }
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d', { willReadFrequently: true })
   const tick = () => {
     if (stopped) return
     if (video.readyState >= 2 && video.videoWidth && context) {
@@ -84,7 +89,7 @@ export async function scanQrCamera(video: HTMLVideoElement, onBytes: (bytes: Uin
       canvas.height = video.videoHeight
       context.drawImage(video, 0, 0)
       const bytes = decodeQrPixels(context.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)
-      if (bytes) { onBytes(bytes); return }
+      if (bytes) { stop(); onBytes(bytes); return }
     }
     frame = requestAnimationFrame(tick)
   }

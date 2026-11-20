@@ -46,6 +46,11 @@ test('registration explains availability and surfaces server refusals', async ({
   await page.getByRole('button', { name: 'Accounts', exact: true }).click()
   await page.getByRole('button', { name: 'Add account' }).click()
   await expect(page.getByRole('heading', { name: 'Add a Matrix account' })).toBeVisible()
+  await page.evaluate(async () => {
+    // @ts-expect-error Vite resolves this browser-only source import.
+    const { engine } = await import('/src/store.ts')
+    engine.loginMethods = async () => ({ password: true, sso: false, oidc: false })
+  })
   await page.getByRole('button', { name: 'Create an account' }).click()
   await expect(page.getByText('Fern checks availability first')).toBeVisible()
   // No real account may be created by a UI test: refuse availability.

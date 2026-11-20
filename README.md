@@ -19,7 +19,7 @@ npm ci
 npm run dev
 ```
 
-Open http://localhost:5173. The default view prompts you to connect an account or create one (the tour demo lives on the hosted instance, or run with `VITE_FERN_DEMO=1 npm run dev` / `?demo=1`). The homeserver must support password authentication and native sliding sync. Multiple accounts sync independently and use separate IndexedDB stores.
+Open http://localhost:5173. Both the hosted app and local default view prompt you to connect an account or create one. The local tour is opt-in through **Explore the demo**, `?demo=1`, or `VITE_FERN_DEMO=1 npm run dev`. Signing out or removing an account selects another real account, or returns to the signed-out gate; it never opens the tour automatically. The homeserver must support password authentication and native sliding sync. Multiple accounts sync independently and use separate IndexedDB stores.
 
 ```sh
 npm test
